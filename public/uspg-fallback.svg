@@ -1,0 +1,8 @@
+<svg width="420" height="140" viewBox="0 0 420 140" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="420" height="140" rx="18" fill="#B5122B"/>
+  <path d="M55 28L92 41V73C92 94 78 107 55 116C32 107 18 94 18 73V41L55 28Z" stroke="white" stroke-width="4"/>
+  <path d="M38 58H72M38 74H72M55 48V91" stroke="white" stroke-width="3" opacity=".85"/>
+  <text x="112" y="58" fill="white" font-family="Arial, sans-serif" font-size="22" font-weight="700">UNIVERSIDAD</text>
+  <text x="112" y="91" fill="white" font-family="Georgia, serif" font-size="36" font-weight="700">SAN PABLO</text>
+  <text x="112" y="116" fill="white" font-family="Arial, sans-serif" font-size="17" letter-spacing="5">GUATEMALA</text>
+</svg>

@@ -1,0 +1,7 @@
+ClassFocus v4.0.0 · USPG Edition · PostgreSQL
+- PostgreSQL real mediante API Node/Express
+- Persistencia de usuarios, materias, asignaciones, evaluaciones, incidencias y atención
+- Sincronización local + PostgreSQL para tolerancia a fallos durante la demo
+- Google Classroom preparado
+- WebRTC para cámaras de alumnos
+- Tema claro/oscuro y marca USPG

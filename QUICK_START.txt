@@ -1,0 +1,24 @@
+CLASSFOCUS v4 + POSTGRESQL
+
+UBUNTU / LINUX
+1. Abre una terminal en la carpeta ClassFocus.
+2. Ejecuta:
+
+   chmod +x start.sh
+   ./start.sh
+
+3. Abre: http://localhost:5173
+
+Si tienes Docker Compose, PostgreSQL se levantará con:
+   docker compose up -d postgres
+
+API PostgreSQL:
+   http://localhost:8788/api/health
+
+USUARIOS DEMO
+Alumno:      student@classfocus.com
+Maestro:     teacher@classfocus.com
+Super Admin: admin@classfocus.com
+Clave:       123456
+
+Si npm muestra ENETUNREACH, el problema es la conexión al registro de npm; vuelve a ejecutar npm install cuando tengas conexión.
