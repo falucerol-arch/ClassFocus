@@ -15,7 +15,7 @@ class StorageService {
   }
 
   read(key, fallback = []) {
-    try { return JSON.parse(localStorage.getItem(key)) || fallback } catch { return fallback }
+    try { return JSON.parse(sessionStorage.getItem(key)) || fallback } catch { return fallback }
   }
 
   getIncidents(studentId, subjectId = 'all') {
@@ -33,13 +33,13 @@ class StorageService {
     const key = `${INCIDENTS_PREFIX}${id}`
     const items = this.read(key)
     items.unshift(incident)
-    localStorage.setItem(key, JSON.stringify(items.slice(0, 100)))
+    sessionStorage.setItem(key, JSON.stringify(items.slice(0, 100)))
     apiClient.addIncident(id, incident).catch(() => {})
   }
 
   clearIncidents(studentId) {
     const id = this.resolveStudentId(studentId)
-    localStorage.removeItem(`${INCIDENTS_PREFIX}${id}`)
+    sessionStorage.removeItem(`${INCIDENTS_PREFIX}${id}`)
   }
 
   getSamples(studentId, subjectId = 'all') {
@@ -57,11 +57,13 @@ class StorageService {
     const key = `${SAMPLES_PREFIX}${id}`
     const samples = this.read(key)
     samples.push(sample)
-    localStorage.setItem(key, JSON.stringify(samples.slice(-240)))
+    sessionStorage.setItem(key, JSON.stringify(samples.slice(-240)))
     apiClient.addSample(id, sample).catch(() => {})
   }
 
   hydrate({ incidents = [], samples = [] } = {}) {
+    // El snapshot de la API reemplaza la caché: elimina también registros que ahora no son visibles.
+    Object.keys(sessionStorage).filter(key => key.startsWith(INCIDENTS_PREFIX) || key.startsWith(SAMPLES_PREFIX) || key === LEGACY_INCIDENTS_KEY || key === LEGACY_SAMPLES_KEY).forEach(key => sessionStorage.removeItem(key))
     const incidentsByStudent = new Map()
     incidents.forEach(item => {
       const id = Number(item.studentId)
@@ -78,7 +80,7 @@ class StorageService {
       incidentsByStudent.set(id, arr)
     })
     for (const [studentId, rows] of incidentsByStudent) {
-      localStorage.setItem(`${INCIDENTS_PREFIX}${studentId}`, JSON.stringify(rows.slice(0, 100)))
+      sessionStorage.setItem(`${INCIDENTS_PREFIX}${studentId}`, JSON.stringify(rows.slice(0, 100)))
     }
 
     const samplesByStudent = new Map()
@@ -97,7 +99,7 @@ class StorageService {
     })
     for (const [studentId, rows] of samplesByStudent) {
       rows.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-      localStorage.setItem(`${SAMPLES_PREFIX}${studentId}`, JSON.stringify(rows.slice(-240)))
+      sessionStorage.setItem(`${SAMPLES_PREFIX}${studentId}`, JSON.stringify(rows.slice(-240)))
     }
   }
 

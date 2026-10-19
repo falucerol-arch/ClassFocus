@@ -6,14 +6,16 @@ import AttentionChart from '../components/AttentionChart'
 import IncidentList from '../components/IncidentList'
 import LiveStudentMonitor from '../components/LiveStudentMonitor'
 import ExamManager from '../components/ExamManager'
+import ClassroomPanel from '../components/ClassroomPanel'
 import { storageService } from '../services/storageService'
 import { academicService } from '../services/academicService'
 import { authService } from '../services/authService'
 
 export default function TeacherDashboard() {
   const user = authService.getCurrentUser()
-  const assignedStudents = useMemo(() => academicService.getStudentsForTeacher(user.id), [user.id])
-  const teacherSubjects = useMemo(() => academicService.getSubjectsForTeacher(user.id), [user.id])
+  const [version, setVersion] = useState(0)
+  const assignedStudents = useMemo(() => academicService.getStudentsForTeacher(user.id), [user.id, version])
+  const teacherSubjects = useMemo(() => academicService.getSubjectsForTeacher(user.id), [user.id, version])
   const [studentId, setStudentId] = useState(assignedStudents[0]?.student.id || '')
   const [subjectId, setSubjectId] = useState('all')
 
@@ -47,6 +49,8 @@ export default function TeacherDashboard() {
 
   return (
     <Layout title="Panel del maestro" subtitle="Supervisa clases en vivo, crea evaluaciones y revisa las métricas de tus alumnos.">
+      <ClassroomPanel onImported={() => setVersion(value => value + 1)} />
+
       <LiveStudentMonitor teacherId={user.id} subjects={teacherSubjects} />
 
       <ExamManager teacher={user} subjects={teacherSubjects} />

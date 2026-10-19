@@ -7,29 +7,28 @@ const clone = value => JSON.parse(JSON.stringify(value))
 class AcademicService {
   getState() {
     try {
-      const saved = JSON.parse(localStorage.getItem(ACADEMIC_KEY))
+      const saved = JSON.parse(sessionStorage.getItem(ACADEMIC_KEY))
       if (saved?.users && saved?.subjects && saved?.assignments) return saved
     } catch {
       // Si el almacenamiento se dañó, se reconstruye con datos demo.
     }
 
     const initial = { users: clone(USERS), subjects: clone(SUBJECTS), assignments: clone(DEFAULT_ASSIGNMENTS) }
-    localStorage.setItem(ACADEMIC_KEY, JSON.stringify(initial))
+    sessionStorage.setItem(ACADEMIC_KEY, JSON.stringify(initial))
     return initial
   }
 
   saveState(state, syncRemote = true) {
-    localStorage.setItem(ACADEMIC_KEY, JSON.stringify(state))
+    sessionStorage.setItem(ACADEMIC_KEY, JSON.stringify(state))
     window.dispatchEvent(new Event('classfocus-academic-updated'))
     if (syncRemote) apiClient.syncAcademic(state).catch(() => {})
   }
 
   hydrate(state) {
     if (!state?.users || !state?.subjects || !state?.assignments) return
-    const previous = this.getState()
-    const passwords = new Map(previous.users.map(user => [user.email?.toLowerCase(), user.password]))
+    // La API no entrega contraseñas. No se inventan claves demo para alumnos importados.
     const next = {
-      users: state.users.map(user => ({ ...user, password: passwords.get(user.email?.toLowerCase()) || '123456' })),
+      users: clone(state.users),
       subjects: clone(state.subjects),
       assignments: clone(state.assignments)
     }
@@ -215,84 +214,6 @@ class AcademicService {
     const state = this.getState()
     state.assignments = state.assignments.filter(item => item.studentId !== Number(studentId))
     this.saveState(state)
-  }
-
-  importClassroomCourse(course) {
-    const teacherProfile = course.teachers?.[0]?.profile
-    const teacherEmail = teacherProfile?.emailAddress
-    if (!teacherProfile) throw new Error('El curso no devolvió un docente que ClassFocus pueda vincular.')
-
-    const state = this.getState()
-    let nextUserId = Math.max(0, ...state.users.map(user => Number(user.id) || 0)) + 1
-
-    const findOrCreateUser = (profile, role) => {
-      const email = profile?.emailAddress?.toLowerCase()
-      const fullName = profile?.name?.fullName || (role === 'teacher' ? 'Docente Classroom' : 'Alumno Classroom')
-      let user = state.users.find(item => email && item.email?.toLowerCase() === email)
-      if (!user) {
-        user = {
-          id: nextUserId++,
-          name: fullName,
-          email: email || `classroom-${nextUserId}@classfocus.local`,
-          password: '123456',
-          role,
-          source: 'google-classroom'
-        }
-        state.users.push(user)
-      }
-      return user
-    }
-
-    const teacher = findOrCreateUser(teacherProfile, 'teacher')
-    let subject = state.subjects.find(item => item.classroomId === course.id)
-      || state.subjects.find(item => item.name?.toLowerCase() === course.name?.toLowerCase())
-    const subjectId = subject?.id || `gc-${course.id}`
-
-    if (!subject) {
-      subject = {
-        id: subjectId,
-        name: course.name || 'Curso de Classroom',
-        code: course.section || `GC-${String(course.id).slice(-6)}`,
-        section: course.section || '',
-        schedule: '',
-        defaultTeacherId: teacher.id,
-        source: 'google-classroom',
-        classroomId: course.id,
-        classroomUrl: course.alternateLink || '',
-        courseWork: clone(course.courseWork || [])
-      }
-      state.subjects.push(subject)
-    } else {
-      subject.name = course.name || subject.name
-      subject.code = course.section || subject.code
-      subject.defaultTeacherId = teacher.id
-      subject.source = 'google-classroom'
-      subject.classroomId = course.id
-      subject.classroomUrl = course.alternateLink || subject.classroomUrl
-      subject.courseWork = clone(course.courseWork || [])
-    }
-
-    let studentsImported = 0
-    for (const row of course.students || []) {
-      const student = findOrCreateUser(row.profile, 'student')
-      state.assignments = state.assignments
-        .map(item => item.studentId === student.id ? { ...item, subjectIds: item.subjectIds.filter(id => id !== subjectId) } : item)
-        .filter(item => item.subjectIds.length)
-      const existing = state.assignments.find(item => item.studentId === student.id && item.teacherId === teacher.id)
-      if (existing) existing.subjectIds = [...new Set([...existing.subjectIds, subjectId])]
-      else state.assignments.push({ studentId: student.id, teacherId: teacher.id, subjectIds: [subjectId] })
-      studentsImported += 1
-    }
-
-    this.saveState(state)
-    return {
-      subjectId,
-      subjectName: subject.name,
-      teacherId: teacher.id,
-      teacherName: teacher.name,
-      teacherEmail,
-      studentsImported
-    }
   }
 
   resetDemoData() {

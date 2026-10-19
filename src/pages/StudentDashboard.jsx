@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, BookMarked, BookOpenCheck, BrainCircuit, Clock3, ExternalLink, FileText, Timer, UserRoundCheck } from 'lucide-react'
 import Layout from '../components/Layout'
 import MetricCard from '../components/MetricCard'
+import ClassroomPanel from '../components/ClassroomPanel'
 import AttentionChart from '../components/AttentionChart'
 import IncidentList from '../components/IncidentList'
 import { storageService } from '../services/storageService'
@@ -20,6 +21,8 @@ export default function StudentDashboard() {
 
   return (
     <Layout title="Panel del alumno" subtitle="Consulta tus materias, evaluaciones y entra a las sesiones supervisadas.">
+      <ClassroomPanel />
+
       <div className="info-banner">
         <UserRoundCheck size={22}/>
         <div>

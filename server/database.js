@@ -10,7 +10,7 @@ export const pool = new Pool({
   ssl: ssl ? { rejectUnauthorized: false } : false
 })
 
-const schema = `
+export const schema = `
 CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   name VARCHAR(160) NOT NULL,
@@ -78,6 +78,38 @@ CREATE TABLE IF NOT EXISTS attention_samples (
   gaze VARCHAR(80) DEFAULT '',
   label VARCHAR(80) DEFAULT '',
   captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Cambios aditivos: las instalaciones existentes conservan sus datos.
+ALTER TABLE subjects ADD COLUMN IF NOT EXISTS classroom_owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE subjects ADD COLUMN IF NOT EXISTS classroom_teachers JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE subjects ADD COLUMN IF NOT EXISTS classroom_synced_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS app_sessions (
+  token_hash TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS classroom_connections (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  google_sub TEXT UNIQUE NOT NULL,
+  email TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  encrypted_tokens TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS classroom_oauth_states (
+  state_hash TEXT PRIMARY KEY,
+  nonce_hash TEXT NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_hash TEXT NOT NULL REFERENCES app_sessions(token_hash) ON DELETE CASCADE,
+  verifier TEXT NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS classroom_people (
+  google_sub TEXT PRIMARY KEY,
+  user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_enrollments_teacher ON enrollments(teacher_id);

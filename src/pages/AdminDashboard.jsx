@@ -150,8 +150,8 @@ export default function AdminDashboard() {
                       <span>{teacher?.name || 'Sin docente base'}{subject.source === 'google-classroom' ? ' · Google Classroom' : ''}</span>
                     </div>
                     <div className="row-actions">
-                      <button className="icon-button" type="button" title="Editar" onClick={() => editSubject(subject)}><Pencil size={17} /></button>
-                      <button className="icon-button danger-icon" type="button" title="Eliminar" onClick={() => deleteSubject(subject)}><Trash2 size={17} /></button>
+                      <button className="icon-button" type="button" disabled={subject.source === 'google-classroom'} title={subject.source === 'google-classroom' ? 'Se administra desde Classroom' : 'Editar'} onClick={() => editSubject(subject)}><Pencil size={17} /></button>
+                      <button className="icon-button danger-icon" type="button" disabled={subject.source === 'google-classroom'} title={subject.source === 'google-classroom' ? 'Se conserva el curso sincronizado' : 'Eliminar'} onClick={() => deleteSubject(subject)}><Trash2 size={17} /></button>
                     </div>
                   </article>
                 )
@@ -182,7 +182,7 @@ export default function AdminDashboard() {
             <label className="field-label">Materia
               <select value={subjectId} onChange={e => setSubjectId(e.target.value)}>
                 <option value="">Selecciona una materia</option>
-                {subjects.map(subject => <option key={subject.id} value={subject.id}>{subject.code} · {subject.name}</option>)}
+                {subjects.filter(subject => subject.source !== 'google-classroom').map(subject => <option key={subject.id} value={subject.id}>{subject.code} · {subject.name}</option>)}
               </select>
             </label>
             <label className="field-label">Maestro
@@ -212,7 +212,7 @@ export default function AdminDashboard() {
                           {assignment.subjects.map(subject => (
                             <div key={subject.id} className="student-subject-assignment">
                               <span><b>{subject.name}</b><small>{assignment.subjectTeachers?.[subject.id]?.name || 'Sin maestro'}</small></span>
-                              <button type="button" className="icon-button danger-icon tiny" title="Quitar materia" onClick={() => removeStudentSubject(student, subject)}><Trash2 size={14} /></button>
+                              <button type="button" className="icon-button danger-icon tiny" disabled={subject.source === 'google-classroom'} title={subject.source === 'google-classroom' ? 'La matrícula se sincroniza desde Classroom' : 'Quitar materia'} onClick={() => removeStudentSubject(student, subject)}><Trash2 size={14} /></button>
                             </div>
                           ))}
                         </div>
