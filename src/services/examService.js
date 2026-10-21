@@ -22,17 +22,17 @@ const clone = value => JSON.parse(JSON.stringify(value))
 class ExamService {
   getAll() {
     try {
-      const saved = JSON.parse(localStorage.getItem(EXAM_KEY))
+      const saved = JSON.parse(sessionStorage.getItem(EXAM_KEY))
       if (Array.isArray(saved)) return saved
     } catch {
       // Se reconstruyen los datos demo si el almacenamiento está dañado.
     }
-    localStorage.setItem(EXAM_KEY, JSON.stringify(seed))
+    sessionStorage.setItem(EXAM_KEY, JSON.stringify(seed))
     return clone(seed)
   }
 
   save(exams, syncRemote = true) {
-    localStorage.setItem(EXAM_KEY, JSON.stringify(exams))
+    sessionStorage.setItem(EXAM_KEY, JSON.stringify(exams))
     window.dispatchEvent(new Event('classfocus-exams-updated'))
     if (syncRemote) apiClient.syncExams(exams).catch(() => {})
   }

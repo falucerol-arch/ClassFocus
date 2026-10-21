@@ -16,9 +16,11 @@ class ApiClient {
 
   async request(path, options = {}) {
     try {
+      const token = sessionStorage.getItem('classfocus_api_token')
       const response = await fetch(`${this.baseUrl}${path}`, {
-        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-        ...options
+        ...options,
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) }
       })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
@@ -38,7 +40,11 @@ class ApiClient {
   bootstrap() { return this.request('/bootstrap') }
   login(payload) { return this.request('/auth/login', { method: 'POST', body: JSON.stringify(payload) }) }
   syncAcademic(state) { return this.request('/academic', { method: 'PUT', body: JSON.stringify(state) }) }
-  syncExams(exams) { return this.request('/exams', { method: 'PUT', body: JSON.stringify({ exams }) }) }
+  syncExams(exams) {
+    const user = JSON.parse(sessionStorage.getItem('classfocus_session') || 'null')
+    const own = user?.role === 'teacher' ? exams.filter(exam => Number(exam.teacherId) === user.id) : exams
+    return this.request('/exams', { method: 'PUT', body: JSON.stringify({ exams: own }) })
+  }
   addIncident(studentId, incident) { return this.request('/incidents', { method: 'POST', body: JSON.stringify({ studentId, incident }) }) }
   addSample(studentId, sample) { return this.request('/samples', { method: 'POST', body: JSON.stringify({ studentId, sample }) }) }
 }

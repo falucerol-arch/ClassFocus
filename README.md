@@ -1,180 +1,98 @@
 # ClassFocus v4 · USPG Edition
 
-ClassFocus es un prototipo académico para supervisión de clases y evaluaciones virtuales. Incluye React + Vite, MediaPipe, Google Classroom, WebRTC y **PostgreSQL**.
+Prototipo académico para gestionar materias y supervisar clases y evaluaciones virtuales.
+React/Vite usa una API Express con PostgreSQL; MediaPipe estima presencia y orientación
+facial, y WebRTC/WebSocket permite mostrar cámaras al docente.
 
-## Arquitectura
+## Arranque en Ubuntu
 
-```text
-React / Vite (5173)
-      |
-      +--> ClassFocus API / Express (8788) --> PostgreSQL (5432)
-      |
-      +--> WebRTC signaling (8787) --> cámaras en vivo
-      |
-      +--> Google Classroom API (opcional)
-```
-
-## Qué se guarda en PostgreSQL
-
-- Usuarios y roles.
-- Materias.
-- Relación alumno · maestro · materia.
-- Evaluaciones y duración.
-- Incidencias de examen.
-- Muestras de atención.
-- Datos vinculados de Google Classroom.
-
-## Inicio rápido en Ubuntu
+Requisitos: Node.js 22 o 24, npm y PostgreSQL. El repositorio incluye Docker Compose
+para ejecutar PostgreSQL 16 sin instalarlo directamente en el sistema.
 
 ```bash
-chmod +x start.sh
-./start.sh
-```
-
-Si tienes Docker + Docker Compose, el script intenta levantar PostgreSQL automáticamente.
-
-Si prefieres hacerlo paso a paso:
-
-```bash
-cp .env.example .env
+git clone https://github.com/falucerol-arch/ClassFocus.git
+cd ClassFocus
+cp .env.example .env  # solo en una instalación nueva
+npm ci
 docker compose up -d postgres
-npm install
 npm run api
 ```
 
-En otra terminal:
+En otra terminal, desde la carpeta del proyecto:
 
 ```bash
 npm run signal
 ```
 
-Y en otra:
+En una tercera:
 
 ```bash
 npm run dev
 ```
 
-Abre `http://localhost:5173`.
+- Aplicación: http://localhost:5173
+- Salud de API/base: http://localhost:8788/api/health
+- Señalización: ws://localhost:8787
 
-## Accesos demo
+La API crea las tablas y los usuarios demo al iniciar. Las ampliaciones de Classroom son
+aditivas y conservan los datos existentes. `start.sh` también permite iniciar los servicios
+juntos; para diagnosticar problemas es más claro mantener las tres terminales separadas.
+No combines el contenedor con el instalador `setup-postgres-ubuntu.sh` en el mismo puerto.
 
-- Alumno: `student@classfocus.com`
-- Maestro: `teacher@classfocus.com`
-- Super Admin: `admin@classfocus.com`
-- Contraseña: `123456`
+## Accesos de demostración
 
-## Estado de PostgreSQL
+| Perfil | Correo | Contraseña local demo |
+| --- | --- | --- |
+| Alumno | student@classfocus.com | 123456 |
+| Maestro | teacher@classfocus.com | 123456 |
+| Super Admin | admin@classfocus.com | 123456 |
 
-En el encabezado aparece una insignia:
+Selecciona el rol correspondiente en la pantalla de acceso. Las sesiones se emiten desde
+Express y duran ocho horas. El inicio de sesión y Google Classroom requieren la API.
+Una sesión ya abierta puede conservar datos en la caché de su pestaña si se interrumpe
+la conexión; esa caché no prueba que un cambio se haya guardado en PostgreSQL.
 
-- **PostgreSQL**: la API y la base están conectadas.
-- **Modo local**: la base no está disponible y el prototipo continúa con caché del navegador.
+## Google Classroom
 
-También puedes revisar `http://localhost:8788/api/health`.
+Sigue **[GOOGLE_CLASSROOM_SETUP.md](GOOGLE_CLASSROOM_SETUP.md)** para crear las credenciales,
+configurar `.env` y probar cuentas institucionales de estudiante o de docente.
 
-Consulta `POSTGRES_SETUP.md`, `GOOGLE_CLASSROOM_SETUP.md` y `LIVE_CAMERA_SETUP.md` para más detalles.
+- Cada usuario local puede conectar varias cuentas Google.
+- El estudiante puede consultar sus cursos activos.
+- El maestro puede importar cursos en los que Google lo reconoce como docente.
+- Se consultan todas las páginas de alumnos y se confirma el guardado en una transacción.
+- Sincronizar actualiza solo la matrícula del curso seleccionado, sin duplicar personas ni
+  mezclar cursos con el mismo nombre o sección de instituciones distintas.
+- Los datos importados se conservan al desvincular una cuenta.
+- Los tokens de Google se cifran en PostgreSQL y nunca se entregan al frontend.
 
+Esta etapa importa cursos y participantes, sin sincronizar actividades o calificaciones.
+Las cuentas nuevas de alumnos importados no reciben `123456`: para habilitarles acceso
+falta implementar invitaciones o inicio de sesión con Google. La guía detalla también los
+límites del modelo existente (un rol por usuario y un responsable local por curso).
 
-
-# 📥 Clonar el repositorio
-
-Para descargar el proyecto utilizando Git:
-
-```bash
-git clone https://github.com/falucerol-arch/ClassFocus.git
-```
-
-Entrar a la carpeta del proyecto:
-
-```bash
-cd ClassFocus
-```
-
-Instalar las dependencias:
-
-```bash
-npm install
-```
-
-Crear el archivo de variables de entorno:
-
-```bash
-cp .env.example .env
-```
-
-## 🗄️ Configurar PostgreSQL en Ubuntu
-
-Dar permisos al instalador:
+## Validación
 
 ```bash
-chmod +x setup-postgres-ubuntu.sh
+npm test
+npm run build
 ```
 
-Ejecutar la instalación y configuración:
+Las pruebas cubren paginación, permisos, OAuth simulado, cifrado, SQL transaccional,
+importación repetida y recuperación ante errores. Usan PostgreSQL en memoria mediante
+PGlite y no contactan Google. La guía explica cómo repetirlas contra un PostgreSQL de prueba.
+La autorización real requiere credenciales y consentimiento de una cuenta Google.
 
-```bash
-./setup-postgres-ubuntu.sh
-```
+## Persistencia y despliegue
 
-## 🚀 Iniciar ClassFocus
+PostgreSQL guarda usuarios, materias, asignaciones, evaluaciones, incidencias, muestras
+de atención, sesiones y conexiones de Classroom. Los videos no se guardan en la base.
 
-Dar permisos al archivo de inicio:
+`.env`, `node_modules` y `dist` no se versionan. No publiques secretos ni claves de cifrado.
+El build conserva la ruta `/ClassFocus/` existente para GitHub Pages, mientras que desarrollo
+usa `/`. GitHub Pages por sí solo no ejecuta Express ni PostgreSQL: la integración completa
+requiere alojar también la API y configurar HTTPS, sus direcciones y OAuth para ese entorno.
 
-```bash
-chmod +x start.sh
-```
-
-Ejecutar:
-
-```bash
-./start.sh
-```
-
-Después abrir en el navegador:
-
-```text
-http://localhost:5173
-```
-
-## 🔄 Descargar futuras actualizaciones
-
-Si ya tienes el proyecto clonado y quieres obtener los cambios más recientes:
-
-```bash
-git pull
-```
-
----
-
-# 📦 Descargar sin Git
-
-También se puede descargar directamente desde GitHub:
-
-```text
-Code → Download ZIP
-```
-
-Después de descomprimir:
-
-```bash
-cd ClassFocus
-```
-
-Instalar dependencias:
-
-```bash
-npm install
-```
-
-Crear el archivo `.env`:
-
-```bash
-cp .env.example .env
-```
-
-Iniciar ClassFocus:
-
-```bash
-chmod +x start.sh
-./start.sh
-```
+Las métricas faciales son estimaciones y no son evidencia suficiente para calificar o sancionar.
+Este proyecto sigue siendo un prototipo; antes de producción deben revisarse privacidad,
+consentimiento, seguridad de señalización y operación institucional.

@@ -15,8 +15,8 @@ export default function Layout({ children, title, subtitle }) {
   const navigate = useNavigate()
   const user = authService.getCurrentUser()
 
-  const logout = () => {
-    authService.logout()
+  const logout = async () => {
+    await authService.logout()
     navigate('/')
   }
 
