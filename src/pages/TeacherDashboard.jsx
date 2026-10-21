@@ -51,7 +51,7 @@ export default function TeacherDashboard() {
     <Layout title="Panel del maestro" subtitle="Supervisa clases en vivo, crea evaluaciones y revisa las métricas de tus alumnos.">
       <ClassroomPanel onImported={() => setVersion(value => value + 1)} />
 
-      <LiveStudentMonitor teacherId={user.id} subjects={teacherSubjects} />
+      <LiveStudentMonitor subjects={teacherSubjects} />
 
       <ExamManager teacher={user} subjects={teacherSubjects} />
 

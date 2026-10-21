@@ -1,0 +1,8 @@
+.class-presence-summary { color: var(--text-soft); font-size: .85rem; margin: 12px 0; }
+.subject-live-status { display: inline-block; margin: 4px 0 8px; padding: 5px 9px; border-radius: 8px; font-size: .78rem; color: var(--text-soft); background: var(--surface-2); }
+.subject-live-status.is-live { color: #166534; background: #dcfce7; font-weight: 700; }
+.class-start-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; background: var(--surface); border: 1px solid var(--border); border-left: 4px solid #22c55e; border-radius: 12px; padding: 16px; margin: 16px 0; }
+.class-start-notice > div { flex: 1; min-width: 200px; }
+.class-start-notice strong, .class-start-notice span { display: block; }
+.class-start-notice span { color: var(--text-soft); font-size: .85rem; margin-top: 5px; }
+.course-actions button:disabled { cursor: default; opacity: .6; }
