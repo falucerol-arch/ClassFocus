@@ -2,7 +2,7 @@
 
 Prototipo académico para gestionar materias y supervisar clases y evaluaciones virtuales.
 React/Vite usa una API Express con PostgreSQL; MediaPipe estima presencia y orientación
-facial, y WebRTC/WebSocket permite mostrar cámaras al docente.
+facial, y WebRTC/WebSocket permite impartir clases con audio, cámara y pantalla compartida.
 
 ## Arranque en Ubuntu
 
@@ -71,6 +71,22 @@ Las cuentas nuevas de alumnos importados no reciben `123456`: para habilitarles 
 falta implementar invitaciones o inicio de sesión con Google. La guía detalla también los
 límites del modelo existente (un rol por usuario y un responsable local por curso).
 
+## Clases en vivo
+
+Sigue **[LIVE_CLASS_SETUP.md](LIVE_CLASS_SETUP.md)** para probar una clase local.
+El maestro elige una materia y abre un aula independiente; los alumnos matriculados
+entran desde su panel. Ambos pueden comprobar sus dispositivos antes de entrar y disponen
+de mosaico, enfoque, presentación y pantalla completa. El maestro gestiona los turnos
+seleccionando al alumno en la lista o desde los tres puntos de su video.
+El panel del alumno indica las clases activas y avisa cuando empiezan, sin recargar.
+Los alumnos ven al maestro o su pantalla, y sus cámaras solo las recibe el maestro.
+Levantar la mano permite solicitar un turno: el maestro lo concede y el alumno decide
+activar su micrófono. El grupo escucha únicamente al alumno autorizado, además del maestro.
+
+La señalización valida sesiones y matrículas en PostgreSQL y separa las salas por materia.
+La versión actual limita cada sala a ocho alumnos; el maestro mantiene una conexión WebRTC
+con cada uno. No graba llamadas. Una desconexión del maestro finaliza su sala.
+
 ## Validación
 
 ```bash
@@ -82,6 +98,9 @@ Las pruebas cubren paginación, permisos, OAuth simulado, cifrado, SQL transacci
 importación repetida y recuperación ante errores. Usan PostgreSQL en memoria mediante
 PGlite y no contactan Google. La guía explica cómo repetirlas contra un PostgreSQL de prueba.
 La autorización real requiere credenciales y consentimiento de una cuenta Google.
+Las pruebas de clase usan WebSockets reales, SQL en PGlite y dobles de WebRTC/dispositivos;
+cubren aislamiento, turnos, ICE adelantado, permisos y liberación de medios.
+El audio/video real y la pantalla compartida se prueban en el navegador según la guía.
 
 ## Persistencia y despliegue
 
