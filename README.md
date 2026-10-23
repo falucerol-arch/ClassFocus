@@ -39,6 +39,13 @@ aditivas y conservan los datos existentes. `start.sh` también permite iniciar l
 juntos; para diagnosticar problemas es más claro mantener las tres terminales separadas.
 No combines el contenedor con el instalador `setup-postgres-ubuntu.sh` en el mismo puerto.
 
+## Demo para exposiciones
+
+`/demo` es una página pública (sin iniciar sesión) que muestra el análisis facial en vivo con malla,
+medidor de atención y alertas. Sigue **[DEMO_EXPO.md](DEMO_EXPO.md)** para prepararla, el guion de 3 minutos
+y el plan B. Para funcionar sin internet: `npm run setup:offline`. Para llenar los paneles con datos:
+`npm run seed:demo`. Los cambios de esta versión están en **[CHANGELOG_4.1.md](CHANGELOG_4.1.md)**.
+
 ## Accesos de demostración
 
 | Perfil | Correo | Contraseña local demo |

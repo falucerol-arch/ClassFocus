@@ -13,7 +13,7 @@ export default function BrandMark({ large = false }) {
 
       <div className="uspg-logo-panel" title="Universidad San Pablo de Guatemala">
         <img
-          src="/uspg-logo-full.png"
+          src={`${import.meta.env.BASE_URL}uspg-logo-full.png`}
           alt="Universidad San Pablo de Guatemala"
         />
       </div>

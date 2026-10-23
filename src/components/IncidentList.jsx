@@ -1,8 +1,11 @@
-const typeLabels = {
+export const typeLabels = {
   gaze: 'Mirada desviada',
   tab: 'Cambio de pestaña',
   'no-face': 'Rostro ausente',
-  fullscreen: 'Salida de pantalla completa'
+  fullscreen: 'Salida de pantalla completa',
+  'multi-face': 'Varias personas',
+  clipboard: 'Copiar o pegar',
+  'camera-off': 'Cámara apagada'
 }
 
 export default function IncidentList({ incidents }) {

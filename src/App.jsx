@@ -7,6 +7,7 @@ import TeacherDashboard from './pages/TeacherDashboard'
 import AdminDashboard from './pages/AdminDashboard'
 import ExamPage from './pages/ExamPage'
 import ClassSession from './pages/ClassSession'
+import DemoKiosk from './pages/DemoKiosk'
 import { authService } from './services/authService'
 import { databaseService } from './services/databaseService'
 
@@ -43,6 +44,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<Login />} />
+      <Route path="/demo" element={<DemoKiosk />} />
       <Route path="/student" element={<ProtectedRoute role="student"><StudentDashboard /></ProtectedRoute>} />
       <Route path="/student/class" element={<ProtectedRoute role="student"><ClassSession /></ProtectedRoute>} />
       <Route path="/student/exam" element={<ProtectedRoute role="student"><ExamPage /></ProtectedRoute>} />

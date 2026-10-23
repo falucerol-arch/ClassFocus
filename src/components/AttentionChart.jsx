@@ -18,7 +18,13 @@ export default function AttentionChart({ data }) {
             <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
             <XAxis dataKey="name" />
             <YAxis domain={[0, 100]} />
-            <Tooltip />
+            <Tooltip
+  contentStyle={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-strong)', borderRadius: 10, color: 'var(--text)', boxShadow: 'var(--shadow)' }}
+  labelStyle={{ color: 'var(--text-soft)' }}
+  itemStyle={{ color: 'var(--text)' }}
+  formatter={value => [`${value}%`, 'Atención']}
+  cursor={{ stroke: 'var(--accent)', strokeOpacity: 0.4 }}
+/>
             <Line type="monotone" dataKey="atencion" stroke="currentColor" strokeWidth={3} dot={false} />
           </LineChart>
         </ResponsiveContainer>

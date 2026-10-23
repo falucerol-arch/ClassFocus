@@ -45,6 +45,7 @@ class ApiClient {
     const own = user?.role === 'teacher' ? exams.filter(exam => Number(exam.teacherId) === user.id) : exams
     return this.request('/exams', { method: 'PUT', body: JSON.stringify({ exams: own }) })
   }
+  liveIncidents(afterId) { return this.request(`/incidents/live${afterId ? `?afterId=${encodeURIComponent(afterId)}` : ''}`) }
   addIncident(studentId, incident) { return this.request('/incidents', { method: 'POST', body: JSON.stringify({ studentId, incident }) }) }
   addSample(studentId, sample) { return this.request('/samples', { method: 'POST', body: JSON.stringify({ studentId, sample }) }) }
 }

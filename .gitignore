@@ -2,3 +2,6 @@ node_modules/
 dist/
 .env
 .DS_Store
+# Generados por `npm run setup:offline` (pesan ~20 MB; se recrean en cada máquina)
+public/mediapipe/
+public/models/*.task
