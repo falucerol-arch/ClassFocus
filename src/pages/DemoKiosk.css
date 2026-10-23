@@ -69,3 +69,7 @@
   .demo-gaze { display:none; }
   .demo-stats { grid-template-columns:repeat(2,1fr); }
 }
+
+@media (max-width: 700px) {
+  .demo-camera .video-wrap { aspect-ratio: 3 / 4; }
+}
