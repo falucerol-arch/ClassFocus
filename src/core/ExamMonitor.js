@@ -4,14 +4,17 @@ export class ExamMonitor {
     this.cooldowns = new Map()
     this.handleVisibility = this.handleVisibility.bind(this)
     this.handleFullscreen = this.handleFullscreen.bind(this)
+    this.handleClipboard = this.handleClipboard.bind(this)
   }
 
   start() {
     document.addEventListener('visibilitychange', this.handleVisibility)
     document.addEventListener('fullscreenchange', this.handleFullscreen)
+    ;['copy', 'cut', 'paste'].forEach(name => document.addEventListener(name, this.handleClipboard))
   }
 
   stop() {
+    ;['copy', 'cut', 'paste'].forEach(name => document.removeEventListener(name, this.handleClipboard))
     document.removeEventListener('visibilitychange', this.handleVisibility)
     document.removeEventListener('fullscreenchange', this.handleFullscreen)
   }
@@ -24,8 +27,13 @@ export class ExamMonitor {
     if (!document.fullscreenElement) this.emit('fullscreen', 'Salida de pantalla completa', 'medium', 2500)
   }
 
+  handleClipboard() {
+    this.emit('clipboard', 'Intento de copiar o pegar durante la evaluación', 'medium', 3000)
+  }
+
   processFaceMetric(metric) {
     if (!metric) return
+    if (metric.faceCount > 1) this.emit('multi-face', 'Se detectan varias personas frente a la cámara', 'high', 8000)
     if (!metric.hasFace) {
       this.emit('no-face', 'No se detecta el rostro', 'high', 7000)
       return

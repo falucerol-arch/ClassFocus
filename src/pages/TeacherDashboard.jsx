@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { BrainCircuit, Download, ExternalLink, EyeOff, Maximize2, Monitor, ScanFace, UserRound, UsersRound } from 'lucide-react'
+import { useMemo, useRef, useState } from 'react'
+import { BarChart3, BrainCircuit, ClipboardList, Download, ExternalLink, EyeOff, GraduationCap, LayoutDashboard, Maximize2, Monitor, ScanFace, UserRound, UsersRound, Video } from 'lucide-react'
 import Layout from '../components/Layout'
 import MetricCard from '../components/MetricCard'
 import AttentionChart from '../components/AttentionChart'
@@ -7,17 +7,54 @@ import IncidentList from '../components/IncidentList'
 import LiveStudentMonitor from '../components/LiveStudentMonitor'
 import ExamManager from '../components/ExamManager'
 import ClassroomPanel from '../components/ClassroomPanel'
+import LiveAlertsFeed from '../components/LiveAlertsFeed'
+import ClassOverview from '../components/ClassOverview'
 import { storageService } from '../services/storageService'
 import { academicService } from '../services/academicService'
 import { authService } from '../services/authService'
+import { apiClient } from '../services/apiClient'
+
+// Cada pestaña agrupa un área. Los paneles se mantienen montados (solo se ocultan) para que las
+// alertas en vivo sigan llegando aunque el maestro esté viendo otra pestaña.
+const TABS = [
+  { id: 'summary', label: 'Resumen', icon: LayoutDashboard },
+  { id: 'live', label: 'Clase en vivo', icon: Video },
+  { id: 'exams', label: 'Evaluaciones', icon: ClipboardList },
+  { id: 'analytics', label: 'Analítica', icon: BarChart3 },
+  { id: 'classroom', label: 'Classroom', icon: GraduationCap }
+]
+const TAB_KEY = 'classfocus_teacher_tab'
+
+const readTab = () => {
+  try {
+    const saved = sessionStorage.getItem(TAB_KEY)
+    return TABS.some(tab => tab.id === saved) ? saved : 'summary'
+  } catch { return 'summary' }
+}
 
 export default function TeacherDashboard() {
   const user = authService.getCurrentUser()
   const [version, setVersion] = useState(0)
+  const [tab, setTab] = useState(readTab)
   const assignedStudents = useMemo(() => academicService.getStudentsForTeacher(user.id), [user.id, version])
   const teacherSubjects = useMemo(() => academicService.getSubjectsForTeacher(user.id), [user.id, version])
   const [studentId, setStudentId] = useState(assignedStudents[0]?.student.id || '')
   const [subjectId, setSubjectId] = useState('all')
+  const lastRefreshRef = useRef(0)
+
+  const openTab = id => {
+    setTab(id)
+    try { sessionStorage.setItem(TAB_KEY, id) } catch { /* La pestaña recordada es opcional. */ }
+  }
+
+  // Al llegar una alerta se actualizan solo las métricas (no los exámenes que el maestro pueda estar editando).
+  const refreshMetrics = () => {
+    if (Date.now() - lastRefreshRef.current < 10000) return
+    lastRefreshRef.current = Date.now()
+    apiClient.bootstrap()
+      .then(data => { storageService.hydrate({ incidents: data.incidents, samples: data.samples }); setVersion(value => value + 1) })
+      .catch(() => {})
+  }
 
   const selected = assignedStudents.find(item => item.student.id === Number(studentId)) || assignedStudents[0]
   const activeStudentId = selected?.student.id
@@ -29,6 +66,12 @@ export default function TeacherDashboard() {
   const changeStudent = value => {
     setStudentId(Number(value))
     setSubjectId('all')
+  }
+
+  // Al elegir un recuadro de la vista rápida se pasa directo a su analítica.
+  const openStudentAnalytics = value => {
+    changeStudent(value)
+    openTab('analytics')
   }
 
   const exportCsv = () => {
@@ -47,18 +90,41 @@ export default function TeacherDashboard() {
     URL.revokeObjectURL(url)
   }
 
+  const noStudents = (
+    <div className="empty-panel"><UsersRound size={42}/><h2>No tienes alumnos asignados</h2><p>El Super Admin debe asignarte alumnos y materias para poder consultar métricas individuales.</p></div>
+  )
+
   return (
     <Layout title="Panel del maestro" subtitle="Supervisa clases en vivo, crea evaluaciones y revisa las métricas de tus alumnos.">
-      <ClassroomPanel onImported={() => setVersion(value => value + 1)} />
+      <nav className="panel-tabs" role="tablist" aria-label="Áreas del panel">
+        {TABS.map(item => {
+          const Icon = item.icon
+          return (
+            <button key={item.id} type="button" role="tab" id={`tab-${item.id}`} aria-selected={tab === item.id} aria-controls={`panel-${item.id}`}
+              className={tab === item.id ? 'active' : ''} onClick={() => openTab(item.id)}>
+              <Icon size={17} /> <span>{item.label}</span>
+            </button>
+          )
+        })}
+      </nav>
 
-      <LiveStudentMonitor subjects={teacherSubjects} />
+      <section className="tab-panel" role="tabpanel" id="panel-summary" aria-labelledby="tab-summary" hidden={tab !== 'summary'}>
+        <LiveAlertsFeed onNew={refreshMetrics} />
+        {selected
+          ? <ClassOverview students={assignedStudents} selectedId={activeStudentId} onSelect={openStudentAnalytics} />
+          : noStudents}
+      </section>
 
-      <ExamManager teacher={user} subjects={teacherSubjects} />
+      <section className="tab-panel" role="tabpanel" id="panel-live" aria-labelledby="tab-live" hidden={tab !== 'live'}>
+        <LiveStudentMonitor subjects={teacherSubjects} />
+      </section>
 
-      {!selected ? (
-        <div className="empty-panel"><UsersRound size={42}/><h2>No tienes alumnos asignados</h2><p>El Super Admin debe asignarte alumnos y materias para poder consultar métricas individuales.</p></div>
-      ) : (
-        <>
+      <section className="tab-panel" role="tabpanel" id="panel-exams" aria-labelledby="tab-exams" hidden={tab !== 'exams'}>
+        <ExamManager teacher={user} subjects={teacherSubjects} />
+      </section>
+
+      <section className="tab-panel" role="tabpanel" id="panel-analytics" aria-labelledby="tab-analytics" hidden={tab !== 'analytics'}>
+        {!selected ? noStudents : (
           <section className="analytics-section">
             <div className="section-heading-wide">
               <div><span className="eyebrow">ANALÍTICA</span><h2>Métricas por alumno</h2><p>Filtra por estudiante y materia para revisar su comportamiento registrado.</p></div>
@@ -106,8 +172,12 @@ export default function TeacherDashboard() {
             <div className="dashboard-actions"><button className="secondary-button" onClick={exportCsv}><Download size={17}/> Exportar incidencias CSV</button></div>
             <div className="two-column"><AttentionChart data={samples} /><IncidentList incidents={incidents} /></div>
           </section>
-        </>
-      )}
+        )}
+      </section>
+
+      <section className="tab-panel" role="tabpanel" id="panel-classroom" aria-labelledby="tab-classroom" hidden={tab !== 'classroom'}>
+        <ClassroomPanel onImported={() => setVersion(value => value + 1)} />
+      </section>
     </Layout>
   )
 }

@@ -235,13 +235,20 @@ export function createApp({ db = pool, transaction = withTransaction, classroomO
     }
   }
 
+  const SEVERITIES = new Set(['info', 'low', 'warning', 'medium', 'high'])
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, Number.isFinite(Number(value)) ? Number(value) : min))
+  const shortText = (value, max) => String(value ?? '').slice(0, max)
+
   app.post('/api/incidents', requireRole('student'), async (req, res) => {
     const { studentId, incident = {} } = req.body || {}
     await validateStudentEvent(req.user, studentId, incident)
+    // El tipo y la severidad se limitan y la hora la fija el servidor: el cliente no puede falsificarla.
+    const type = /^[a-z0-9-]{1,60}$/i.test(incident.type || '') ? incident.type : 'unknown'
+    const severity = SEVERITIES.has(incident.severity) ? incident.severity : 'warning'
     const result = await db.query(
       `INSERT INTO incidents (student_id,subject_id,exam_id,type,message,severity,occurred_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-      [Number(studentId), incident.subjectId || null, incident.examId || null, incident.type || 'unknown', incident.message || '', incident.severity || 'warning', incident.timestamp || new Date().toISOString()]
+       VALUES ($1,$2,$3,$4,$5,$6,NOW()) RETURNING id`,
+      [Number(studentId), incident.subjectId || null, incident.examId || null, type, shortText(incident.message, 300), severity]
     )
     res.status(201).json({ ok: true, id: String(result.rows[0].id) })
   })
@@ -251,10 +258,39 @@ export function createApp({ db = pool, transaction = withTransaction, classroomO
     await validateStudentEvent(req.user, studentId, sample)
     const result = await db.query(
       `INSERT INTO attention_samples (student_id,subject_id,attention,expression,gaze,label,captured_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-      [Number(studentId), sample.subjectId || null, Number(sample.attention || 0), sample.expression || 'Neutral', sample.gaze || '', sample.label || '', sample.timestamp || new Date().toISOString()]
+       VALUES ($1,$2,$3,$4,$5,$6,NOW()) RETURNING id`,
+      [Number(studentId), sample.subjectId || null, clamp(sample.attention, 0, 100), shortText(sample.expression || 'Neutral', 80),
+        shortText(sample.gaze, 80), shortText(sample.label, 80)]
     )
     res.status(201).json({ ok: true, id: String(result.rows[0].id) })
+  })
+
+  // Alertas casi en vivo para el maestro. Sin afterId solo devuelve el último id (no vuelca el historial).
+  // El maestro ve únicamente sus materias; el admin ve todo.
+  app.get('/api/incidents/live', requireRole('teacher', 'admin'), async (req, res) => {
+    const isAdmin = req.user.role === 'admin'
+    const afterRaw = req.query.afterId
+    const hasCursor = typeof afterRaw === 'string' && /^\d{1,15}$/.test(afterRaw)
+    const scope = isAdmin ? 'TRUE' : `i.subject_id IN (SELECT id FROM subjects WHERE default_teacher_id=$1
+      UNION SELECT subject_id FROM enrollments WHERE teacher_id=$1)`
+    const scopeParams = isAdmin ? [] : [req.user.id]
+    if (!hasCursor) {
+      const last = await db.query(`SELECT COALESCE(MAX(i.id),0) AS last FROM incidents i WHERE ${scope}`, scopeParams)
+      return res.json({ lastId: String(last.rows[0].last), incidents: [] })
+    }
+    const result = await db.query(
+      `SELECT i.id,i.type,i.message,i.severity,i.occurred_at,i.student_id,u.name AS student_name,
+              i.subject_id,s.name AS subject_name
+         FROM incidents i JOIN users u ON u.id=i.student_id LEFT JOIN subjects s ON s.id=i.subject_id
+        WHERE ${scope} AND i.id > $${scopeParams.length + 1} ORDER BY i.id ASC LIMIT 50`,
+      [...scopeParams, afterRaw])
+    const incidents = result.rows.map(row => ({
+      id: String(row.id), type: row.type, message: row.message, severity: row.severity,
+      timestamp: row.occurred_at?.toISOString?.() || row.occurred_at,
+      studentId: row.student_id, studentName: row.student_name,
+      subjectId: row.subject_id, subjectName: row.subject_name || 'General'
+    }))
+    res.json({ lastId: incidents.length ? incidents.at(-1).id : afterRaw, incidents })
   })
 
   app.use((error, _req, res, _next) => {

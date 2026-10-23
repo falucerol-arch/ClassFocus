@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ShieldCheck, UserRound, Crown, ScanFace, BookOpenCheck, BarChart3 } from 'lucide-react'
+import { ShieldCheck, UserRound, Crown, ScanFace, BookOpenCheck, BarChart3, Sparkles } from 'lucide-react'
 import { authService } from '../services/authService'
 import ThemeToggle from '../components/ThemeToggle'
 import BrandMark from '../components/BrandMark'
@@ -65,6 +65,7 @@ export default function Login() {
         <label>Contraseña<input value={password} onChange={e => setPassword(e.target.value)} type="password" required /></label>
         {error && <div className="alert error">{error}</div>}
         <button className="primary-button login-submit" type="submit" disabled={loading}>{loading ? 'Conectando…' : 'Ingresar a ClassFocus'}</button>
+        <button className="secondary-button login-demo-link" type="button" onClick={() => navigate('/demo')}><Sparkles size={17}/> Probar la demo en vivo (sin iniciar sesión)</button>
         <div className="demo-box"><strong>Accesos demo</strong><span>Alumno · student@classfocus.com</span><span>Maestro · teacher@classfocus.com</span><span>Super Admin · admin@classfocus.com</span><span>Contraseña · 123456</span></div>
       </form>
     </div>

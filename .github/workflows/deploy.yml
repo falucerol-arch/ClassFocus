@@ -27,7 +27,7 @@ jobs:
       - name: Configurar Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Instalar dependencias
@@ -35,6 +35,10 @@ jobs:
 
       - name: Compilar ClassFocus
         run: npm run build
+
+      # GitHub Pages no conoce las rutas de React: 404.html permite abrir /demo directamente.
+      - name: Habilitar rutas directas (SPA)
+        run: cp dist/index.html dist/404.html
 
       - name: Configurar GitHub Pages
         uses: actions/configure-pages@v5
