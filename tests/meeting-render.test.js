@@ -43,7 +43,7 @@ await build({ stdin: { contents: `export { default as Meeting } from './src/comp
   outfile: output, bundle: true, format: 'esm', platform: 'node', jsx: 'automatic',
   banner: { js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);" }, loader: { '.css': 'empty' },
   plugins: [{ name: 'test-dependencies', setup(builder) {
-    builder.onResolve({ filter: /^react(?:$|\/)|^react-dom(?:$|\/)|^react-router-dom$/ }, args => ({ path: require.resolve(args.path), external: true }))
+    builder.onResolve({ filter: /^react(?:$|\/)|^react-dom(?:$|\/)|^react-router-dom$/ }, args => { const file = require.resolve(args.path); return { path: args.kind === 'require-call' || args.kind === 'require-resolve' ? file : pathToFileURL(file).href, external: true } })
     builder.onResolve({ filter: /(?:services\/liveClassService|\.\/src\/services\/liveClassService)$/ }, () => ({ path: 'transport', namespace: 'test' }))
     builder.onResolve({ filter: /core\/FaceAnalyzer$/ }, () => ({ path: 'analyzer', namespace: 'test' }))
     builder.onLoad({ filter: /.*/, namespace: 'test' }, args => ({ contents: args.path === 'transport' ? transport : 'export class FaceAnalyzer { async initialize() {} close() {} analyze() { return null } }' }))
