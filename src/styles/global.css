@@ -451,3 +451,9 @@ code { color: var(--accent); background: var(--bg-muted); border-radius: 7px; pa
   .panel-tabs { flex-wrap:nowrap; overflow-x:auto; position:static; }
   .panel-tabs button { flex:none; }
 }
+/* Login más limpio: sin descripciones largas */
+.login-hero > p,
+.login-hero .feature-strip,
+.login-card-head p { display: none; }
+.login-card-head { margin-bottom: 16px; }
+.login-card .login-demo-link { margin-top: 10px; }

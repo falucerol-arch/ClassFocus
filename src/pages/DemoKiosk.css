@@ -73,3 +73,7 @@
 @media (max-width: 700px) {
   .demo-camera .video-wrap { aspect-ratio: 3 / 4; }
 }
+
+/* Demo más limpia: sin textos explicativos */
+.demo-hero p,
+.demo-spark small { display: none; }
