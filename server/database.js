@@ -1,13 +1,15 @@
+
 import pg from 'pg'
 import bcrypt from 'bcryptjs'
 
 const { Pool } = pg
 
-const ssl = String(process.env.DATABASE_SSL || 'false').toLowerCase() === 'true'
+const connectionString =
+  process.env.DATABASE_URL ||
+  'postgresql://classfocus:classfocus123@localhost:5432/classfocus'
 
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://classfocus:classfocus123@localhost:5432/classfocus',
-  ssl: ssl ? { rejectUnauthorized: false } : false
+  connectionString
 })
 
 export const schema = `
@@ -81,15 +83,24 @@ CREATE TABLE IF NOT EXISTS attention_samples (
 );
 
 -- Cambios aditivos: las instalaciones existentes conservan sus datos.
-ALTER TABLE subjects ADD COLUMN IF NOT EXISTS classroom_owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
-ALTER TABLE subjects ADD COLUMN IF NOT EXISTS classroom_teachers JSONB NOT NULL DEFAULT '[]'::jsonb;
-ALTER TABLE subjects ADD COLUMN IF NOT EXISTS classroom_synced_at TIMESTAMPTZ;
+ALTER TABLE subjects
+ADD COLUMN IF NOT EXISTS classroom_owner_user_id
+INTEGER REFERENCES users(id) ON DELETE SET NULL;
+
+ALTER TABLE subjects
+ADD COLUMN IF NOT EXISTS classroom_teachers
+JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+ALTER TABLE subjects
+ADD COLUMN IF NOT EXISTS classroom_synced_at
+TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS app_sessions (
   token_hash TEXT PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   expires_at TIMESTAMPTZ NOT NULL
 );
+
 CREATE TABLE IF NOT EXISTS classroom_connections (
   id SERIAL PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -99,6 +110,7 @@ CREATE TABLE IF NOT EXISTS classroom_connections (
   encrypted_tokens TEXT NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
 CREATE TABLE IF NOT EXISTS classroom_oauth_states (
   state_hash TEXT PRIMARY KEY,
   nonce_hash TEXT NOT NULL,
@@ -107,15 +119,23 @@ CREATE TABLE IF NOT EXISTS classroom_oauth_states (
   verifier TEXT NOT NULL,
   expires_at TIMESTAMPTZ NOT NULL
 );
+
 CREATE TABLE IF NOT EXISTS classroom_people (
   google_sub TEXT PRIMARY KEY,
   user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_enrollments_teacher ON enrollments(teacher_id);
-CREATE INDEX IF NOT EXISTS idx_incidents_student ON incidents(student_id, occurred_at DESC);
-CREATE INDEX IF NOT EXISTS idx_samples_student ON attention_samples(student_id, captured_at DESC);
-CREATE INDEX IF NOT EXISTS idx_exams_subject ON exams(subject_id, status);
+CREATE INDEX IF NOT EXISTS idx_enrollments_teacher
+ON enrollments(teacher_id);
+
+CREATE INDEX IF NOT EXISTS idx_incidents_student
+ON incidents(student_id, occurred_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_samples_student
+ON attention_samples(student_id, captured_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_exams_subject
+ON exams(subject_id, status);
 `
 
 export async function initializeDatabase() {
@@ -134,53 +154,106 @@ async function seedDatabase() {
   ]
 
   const passwordHash = await bcrypt.hash('123456', 10)
+
   for (const [id, name, email, role] of users) {
     await pool.query(
-      `INSERT INTO users (id,name,email,password_hash,role,source)
-       VALUES ($1,$2,$3,$4,$5,'classfocus')
-       ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,email=EXCLUDED.email,role=EXCLUDED.role,updated_at=NOW()`,
+      `INSERT INTO users (id, name, email, password_hash, role, source)
+       VALUES ($1, $2, $3, $4, $5, 'classfocus')
+       ON CONFLICT (id)
+       DO UPDATE SET
+         name = EXCLUDED.name,
+         email = EXCLUDED.email,
+         role = EXCLUDED.role,
+         updated_at = NOW()`,
       [id, name, email, passwordHash, role]
     )
   }
-  await pool.query(`SELECT setval(pg_get_serial_sequence('users','id'), GREATEST((SELECT COALESCE(MAX(id),1) FROM users), 1), true)`)
+
+  await pool.query(`
+    SELECT setval(
+      pg_get_serial_sequence('users', 'id'),
+      GREATEST(
+        (SELECT COALESCE(MAX(id), 1) FROM users),
+        1
+      ),
+      true
+    )
+  `)
 
   const subjects = [
-    ['prog1','Programación I','SIS-101'],
-    ['db1','Base de Datos I','SIS-202'],
-    ['math1','Matemática I','MAT-101'],
-    ['net1','Redes I','RED-201'],
-    ['web1','Desarrollo Web','SIS-220']
+    ['prog1', 'Programación I', 'SIS-101'],
+    ['db1', 'Base de Datos I', 'SIS-202'],
+    ['math1', 'Matemática I', 'MAT-101'],
+    ['net1', 'Redes I', 'RED-201'],
+    ['web1', 'Desarrollo Web', 'SIS-220']
   ]
-  for (const [id,name,code] of subjects) {
+
+  for (const [id, name, code] of subjects) {
     await pool.query(
-      `INSERT INTO subjects (id,name,code) VALUES ($1,$2,$3)
-       ON CONFLICT (id) DO NOTHING`, [id,name,code]
+      `INSERT INTO subjects (id, name, code)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (id) DO NOTHING`,
+      [id, name, code]
     )
   }
 
   const enrollments = [
-    [1,2,'prog1'],[1,2,'db1'],[4,2,'prog1'],[4,2,'web1'],[6,5,'math1'],[6,5,'net1']
+    [1, 2, 'prog1'],
+    [1, 2, 'db1'],
+    [4, 2, 'prog1'],
+    [4, 2, 'web1'],
+    [6, 5, 'math1'],
+    [6, 5, 'net1']
   ]
+
   for (const [studentId, teacherId, subjectId] of enrollments) {
     await pool.query(
-      `INSERT INTO enrollments (student_id,teacher_id,subject_id) VALUES ($1,$2,$3)
-       ON CONFLICT (student_id,subject_id) DO NOTHING`, [studentId, teacherId, subjectId]
+      `INSERT INTO enrollments (
+        student_id,
+        teacher_id,
+        subject_id
+      )
+      VALUES ($1, $2, $3)
+      ON CONFLICT (student_id, subject_id) DO NOTHING`,
+      [studentId, teacherId, subjectId]
     )
   }
 
-  await pool.query(
-    `INSERT INTO exams (id,teacher_id,subject_id,title,instructions,duration_minutes,form_url,status)
-     VALUES ('exam-demo-prog1',2,'prog1','Parcial 1 · Programación I','Responde todas las preguntas. Mantén la cámara activa durante toda la evaluación.',35,'','published')
-     ON CONFLICT (id) DO NOTHING`
-  )
+  await pool.query(`
+    INSERT INTO exams (
+      id,
+      teacher_id,
+      subject_id,
+      title,
+      instructions,
+      duration_minutes,
+      form_url,
+      status
+    )
+    VALUES (
+      'exam-demo-prog1',
+      2,
+      'prog1',
+      'Parcial 1 · Programación I',
+      'Responde todas las preguntas. Mantén la cámara activa durante toda la evaluación.',
+      35,
+      '',
+      'published'
+    )
+    ON CONFLICT (id) DO NOTHING
+  `)
 }
 
 export async function withTransaction(callback) {
   const client = await pool.connect()
+
   try {
     await client.query('BEGIN')
+
     const result = await callback(client)
+
     await client.query('COMMIT')
+
     return result
   } catch (error) {
     await client.query('ROLLBACK')
