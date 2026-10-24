@@ -2547,6 +2547,7 @@ export function createApp({
 // ERRORES
 // =========================================================
 
+
 app.use(
   (
     error,
@@ -2563,29 +2564,14 @@ app.use(
       console.error(
         '[ClassFocus API] Error interno:',
         {
-          code:
-            error.code,
-
-          message:
-            error.message,
-
-          detail:
-            error.detail,
-
-          constraint:
-            error.constraint,
-
-          table:
-            error.table,
-
-          schema:
-            error.schema,
-
-          column:
-            error.column,
-
-          routine:
-            error.routine
+          code: error.code,
+          message: error.message,
+          detail: error.detail,
+          constraint: error.constraint,
+          table: error.table,
+          schema: error.schema,
+          column: error.column,
+          routine: error.routine
         }
       )
     }
@@ -2602,7 +2588,7 @@ app.use(
 )
 
 return app
-
+}
 // =========================================================
 // INICIO DEL SERVIDOR
 // =========================================================
