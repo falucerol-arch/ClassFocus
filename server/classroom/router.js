@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { Router, urlencoded } from 'express'
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto'
 import { hashToken, requireRole } from '../auth.js'
 import { HttpError } from '../errors.js'
@@ -64,6 +64,20 @@ export function createClassroomRouter({ db, transaction, auth, config = classroo
     res.redirect(destination.href)
   })
 
+  // La navegación POST abre la API como página principal. Así el navegador acepta
+  // su cookie Lax incluso cuando React está en otro sitio (p. ej. dos servicios Render).
+  // La sesión viaja únicamente en el cuerpo HTTPS, nunca en la URL ni hacia Google.
+  router.post('/launch', urlencoded({ extended: false, limit: '4kb' }), async (req, res, next) => {
+    const token = scalar(req.body?.sessionToken)
+    req.headers.authorization = `Bearer ${token}`
+    return auth.requireUser(req, res, next)
+  }, async (req, res) => {
+    requireConfiguration(config)
+    res.set('Referrer-Policy', 'no-referrer')
+    const url = await beginAuthorization(req, res)
+    res.redirect(303, url)
+  })
+
   router.use(auth.requireUser)
   router.get('/status', async (req, res) => {
     const result = await db.query(`SELECT id,email,display_name,updated_at FROM classroom_connections
@@ -72,7 +86,7 @@ export function createClassroomRouter({ db, transaction, auth, config = classroo
   })
   router.use((_req, _res, next) => { requireConfiguration(config); next() })
 
-  router.post('/authorize', async (req, res) => {
+  async function beginAuthorization(req, res) {
     const state = randomBytes(32).toString('base64url')
     const nonce = randomBytes(32).toString('base64url')
     const verifier = randomBytes(32).toString('base64url')
@@ -80,7 +94,12 @@ export function createClassroomRouter({ db, transaction, auth, config = classroo
     await db.query(`INSERT INTO classroom_oauth_states (state_hash,nonce_hash,user_id,session_hash,verifier,expires_at)
       VALUES ($1,$2,$3,$4,$5,NOW()+INTERVAL '10 minutes')`, [hashToken(state), hashToken(nonce), req.user.id, req.user.token_hash, verifier])
     res.cookie(cookieName, nonce, { ...cookieOptions, maxAge: 600000 })
-    res.json({ url: gateway.authorizationUrl(state, sha256url(verifier)) })
+    return gateway.authorizationUrl(state, sha256url(verifier))
+  }
+
+  // Se conserva el contrato anterior para clientes locales; la web usa /launch.
+  router.post('/authorize', async (req, res) => {
+    res.json({ url: await beginAuthorization(req, res) })
   })
 
   const withConnection = async (req, action) => {

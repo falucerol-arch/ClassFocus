@@ -153,3 +153,37 @@ los pasos anteriores; no está sustituida por las pruebas simuladas.
 - Permisos de Classroom: https://developers.google.com/workspace/classroom/guides/auth
 - Paginación de alumnos: https://developers.google.com/workspace/classroom/reference/rest/v1/courses.students/list
 - Roles por curso: https://developers.google.com/workspace/classroom/guides/manage-users
+
+## Frontend y API en servicios distintos de Render
+
+La web inicia OAuth mediante una navegación POST a `/api/classroom/launch`.
+El formulario oculto envía la sesión de ClassFocus en el cuerpo HTTPS a nuestra API,
+que valida al usuario, crea la cookie HttpOnly/SameSite=Lax y responde con una redirección
+303 a Google. La sesión no se pone en la URL ni se envía a Google.
+
+Esta navegación es necesaria porque crear esa cookie mediante `fetch` desde otro sitio
+puede ser bloqueado por el navegador. No se desactiva la validación: el callback sigue
+exigiendo cookie, state, sesión vigente, PKCE y consumo único del intento.
+
+Después de aplicar este cambio hay que desplegar **API y frontend**. Desplegar solo uno
+no actualiza el flujo completo. No requiere tablas nuevas ni cambiar la clave de cifrado.
+
+Para la instalación actual, la API debe tener:
+
+```dotenv
+FRONTEND_URL=https://classfocus-6e5z.onrender.com
+GOOGLE_REDIRECT_URI=https://classfocus-api.onrender.com/api/classroom/callback
+```
+
+Y el frontend debe compilarse con:
+
+```dotenv
+VITE_API_URL=https://classfocus-api.onrender.com/api
+```
+
+Conserva esa URI exacta en el cliente OAuth de Google Cloud. Luego inicia un intento nuevo
+desde el botón de ClassFocus; no recargues un callback anterior ni reutilices su enlace.
+Prueba en una ventana normal con cookies de terceros bloqueadas y verifica que regrese
+al panel correcto, muestre la cuenta conectada y pueda consultar cursos. Esa prueba real
+requiere los servicios públicos y una cuenta Google autorizada; las pruebas automáticas
+usan un proveedor simulado y no reemplazan esta comprobación.
