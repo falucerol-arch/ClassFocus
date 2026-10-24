@@ -5,8 +5,23 @@ class ClassroomService {
   status() { return apiClient.request('/classroom/status') }
 
   async connect() {
-    const { url } = await apiClient.request('/classroom/authorize', { method: 'POST' })
-    window.location.assign(url)
+    const token = sessionStorage.getItem('classfocus_api_token')
+    if (!token) throw new Error('Inicia sesión nuevamente para conectar Google Classroom.')
+
+    // Una navegación real permite crear la cookie de seguridad en el sitio de la API.
+    // fetch entre dominios con SameSite=Lax puede perderla. No se envía el token en la URL.
+    const form = document.createElement('form')
+    form.method = 'POST'
+    form.target = '_self'
+    form.action = `${apiClient.baseUrl}/classroom/launch`
+    form.hidden = true
+    const input = document.createElement('input')
+    input.type = 'hidden'
+    input.name = 'sessionToken'
+    input.value = token
+    form.appendChild(input)
+    document.body.appendChild(form)
+    try { form.submit() } finally { form.remove() }
   }
 
   listCourses(connectionId) {

@@ -97,6 +97,62 @@ test('integración PostgreSQL: OAuth, permisos, importaciones completas, repetic
     assert.equal((await request('/exams', student, { exams: [] }, 'PUT')).response.status, 403)
   })
 
+  await t.test('OAuth entre sitios: el formulario exige sesión y mantiene cookie, state y PKCE', async () => {
+    const launch = async token => fetch(`${root}/classroom/launch`, {
+      method: 'POST', redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: 'https://classfocus-6e5z.onrender.com' },
+      body: new URLSearchParams({ sessionToken: token })
+    })
+    assert.equal((await launch('')).status, 401)
+    assert.equal((await launch('forged')).status, 401)
+    const response = await launch(teacher)
+    assert.equal(response.status, 303)
+    assert.equal(response.headers.get('referrer-policy'), 'no-referrer')
+    const location = response.headers.get('location')
+    assert.ok(!location.includes(teacher), 'La sesión de ClassFocus nunca llega a Google')
+    const url = new URL(location)
+    const state = url.searchParams.get('state')
+    assert.match(state, /^[A-Za-z0-9_-]{43}$/)
+    assert.match(url.searchParams.get('challenge'), /^[A-Za-z0-9_-]{43}$/)
+    const header = response.headers.get('set-cookie')
+    assert.match(header, /HttpOnly/)
+    assert.match(header, /SameSite=Lax/)
+    assert.match(header, /Path=\/api\/classroom\/callback/)
+    assert.equal((await request(`/classroom/callback?state=${state}&code=fake-code`)).response.status, 400)
+    assert.equal((await request(`/classroom/callback?state=${state}&code=fake-code`, null, undefined, 'GET', {
+      Cookie: 'classfocus_oauth_nonce=' + 'x'.repeat(43)
+    })).response.status, 400)
+    const completed = await request(`/classroom/callback?state=${state}&code=fake-code`, null, undefined, 'GET', { Cookie: header.split(';')[0] })
+    assert.equal(completed.response.status, 302)
+    assert.match(completed.response.headers.get('location'), /classroom=connected/)
+    assert.equal((await request(`/classroom/callback?state=${state}&code=fake-code`, null, undefined, 'GET', { Cookie: header.split(';')[0] })).response.status, 400)
+    // Este caso no debe alterar las conexiones usadas por las pruebas siguientes.
+    await db.query('DELETE FROM classroom_connections')
+  })
+
+  await t.test('OAuth en HTTPS: conserva Secure y la ruta del callback al navegar desde otro sitio', async () => {
+    const publicApp = createApp({ db, transaction, classroomOptions: {
+      config: { ...config, frontendUrl: 'https://classfocus-6e5z.onrender.com', redirectUri: 'https://classfocus-api.onrender.com/api/classroom/callback' }, gateway
+    } }).listen(0, '127.0.0.1')
+    await once(publicApp, 'listening')
+    try {
+      const response = await fetch(`http://127.0.0.1:${publicApp.address().port}/api/classroom/launch`, {
+        method: 'POST', redirect: 'manual',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Origin: 'https://classfocus-6e5z.onrender.com' },
+        body: new URLSearchParams({ sessionToken: teacher })
+      })
+      assert.equal(response.status, 303)
+      assert.match(response.headers.get('set-cookie'), /; Secure/)
+      assert.match(response.headers.get('set-cookie'), /; HttpOnly/)
+      assert.match(response.headers.get('set-cookie'), /; SameSite=Lax/)
+      assert.match(response.headers.get('set-cookie'), /Path=\/api\/classroom\/callback/)
+      assert.equal(response.headers.get('cache-control'), 'no-store')
+    } finally {
+      publicApp.closeAllConnections()
+      await new Promise(resolve => publicApp.close(resolve))
+    }
+  })
+
   const connect = async (token, identity) => {
     sub = identity
     const { response, data } = await request('/classroom/authorize', token, {}, 'POST')
