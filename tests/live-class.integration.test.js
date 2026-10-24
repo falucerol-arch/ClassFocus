@@ -120,6 +120,39 @@ test('clases: salas autenticadas, aislamiento, turnos, bajas y cierre', async t 
     assert.equal('teacherVideo' in listing.classes[0], false, 'Los avisos no necesitan datos de la transmisión.')
     observer.socket.close()
   })
+  await t.test('pantalla del alumno: exige turno, se publica al grupo y se retira al revocarlo', async () => {
+    const broadcast = async sender => {
+      const rooms = await Promise.all([teacher.box.next('room'), student.box.next('room'), second.box.next('room')])
+      assert.deepEqual(rooms[1], rooms[0]); assert.deepEqual(rooms[2], rooms[0]); return rooms[0]
+    }
+    teacher.box.send({ type: 'floor', peerId: student.id }); await broadcast()
+    student.box.send({ type: 'media', source: 'camera' })
+    const camera = await broadcast()
+    assert.equal(camera.students.find(s => s.peerId === student.id).video.source, 'camera')
+    student.box.send({ type: 'media', source: 'off' })
+    const off = await broadcast()
+    assert.equal(off.students.find(s => s.peerId === student.id).video.source, 'off')
+    assert.ok(off.students.find(s => s.peerId === student.id).video.revision > camera.students.find(s => s.peerId === student.id).video.revision)
+    student.box.send({ type: 'media', source: 'screen' })
+    assert.equal((await broadcast()).presentation.peerId, student.id)
+    teacher.box.send({ type: 'floor', peerId: null })
+    const revoked = await broadcast()
+    assert.equal(revoked.presentation, null)
+    assert.equal(revoked.students.find(s => s.peerId === student.id).video.source, 'off')
+    teacher.box.send({ type: 'floor', peerId: student.id }); await broadcast()
+    student.box.send({ type: 'media', source: 'screen' }); await broadcast()
+    student.box.send({ type: 'hand', raised: false })
+    assert.equal((await broadcast()).presentation, null)
+    teacher.box.send({ type: 'floor', peerId: student.id }); await broadcast()
+    student.box.send({ type: 'media', source: 'screen' }); await broadcast()
+    teacher.box.send({ type: 'media', source: 'screen' })
+    const takeover = await broadcast()
+    assert.equal(takeover.presentation.peerId, teacher.id)
+    assert.equal(takeover.students.find(s => s.peerId === student.id).video.source, 'off')
+    teacher.box.send({ type: 'media', source: 'camera' }); await broadcast()
+    teacher.box.send({ type: 'floor', peerId: null }); await broadcast()
+  })
+
   await t.test('el maestro concede y retira la palabra; el alumno puede devolverla', async () => {
     student.box.send({ type: 'hand', raised: true })
     assert.equal((await teacher.box.next('room')).students.find(s => s.peerId === student.id).hand, true)
@@ -151,9 +184,14 @@ test('clases: salas autenticadas, aislamiento, turnos, bajas y cierre', async t 
     await attacker.box.next('joined'); await attacker.box.next('room'); await teacher.box.next('room'); await student.box.next('room')
     const before = { ...server.rooms.get('a').teacherVideo }
     attacker.box.send({ type: 'media', source: 'off' })
-    assert.match((await attacker.box.next('error')).message, /permitida/)
+    const own = await attacker.box.next('room')
+    assert.equal(own.students.find(s => s.peerId === attacker.id).video.source, 'off')
     await teacher.box.next('room'); await student.box.next('room')
     assert.deepEqual(server.rooms.get('a').teacherVideo, before)
+    // Puede anunciar su propia cámara, pero no presentar sin permiso ni alterar al docente.
+    attacker.box.send({ type: 'media', source: 'screen' })
+    assert.match((await attacker.box.next('error')).message, /Pide la palabra/)
+    await teacher.box.next('room'); await student.box.next('room')
   })
   await t.test('la eliminación de matrícula expulsa al alumno', async () => {
     await db.query("DELETE FROM enrollments WHERE student_id=1 AND subject_id='a'")

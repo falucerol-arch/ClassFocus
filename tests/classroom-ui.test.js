@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { classroomError, focusedParticipant, meetingParticipants } from '../src/services/classroomUi.js'
+import { classroomError, focusedParticipant, meetingParticipants, meetingPresentation } from '../src/services/classroomUi.js'
 
 test('UI: un micrófono o cámara ausentes muestran instrucciones en español', () => {
   assert.match(classroomError({ name: 'NotFoundError', message: 'Requested device not found' }, 'microphone'), /ningún micrófono disponible/)
@@ -44,4 +44,36 @@ test('presentación: una fuente apagada no entrega al video la pista remota cong
   view.room.teacherVideo = { source: 'camera', revision: 3 }
   assert.equal(visible().stream, remote)
   assert.equal(visible().videoRevision, 3)
+})
+
+test('cámara del alumno: el apagado retira el último fotograma en la vista del maestro', () => {
+  const stream = { video: 'último fotograma' }
+  const student = { peerId: 's', name: 'Alumno', video: { source: 'camera', revision: 1 } }
+  const view = { room: { students: [student] }, remotes: new Map([['s', { stream }]]) }
+  assert.equal(meetingParticipants('teacher', { name: 'Docente' }, view)[1].stream, stream)
+  student.video = { source: 'off', revision: 2 }
+  const tile = meetingParticipants('teacher', { name: 'Docente' }, view)[1]
+  assert.equal(tile.stream, null)
+  assert.equal(tile.videoRevision, 2)
+  assert.equal(view.remotes.get('s').stream, stream)
+})
+
+
+test('presentación del alumno: llega al grupo sin exponer las cámaras privadas', () => {
+  const stream = 'pantalla del alumno', camera = 'cámara privada'
+  const room = { teacher: { peerId: 't', name: 'Docente' }, teacherVideo: { source: 'off' },
+    students: [{ peerId: 's', name: 'Alumno', video: { source: 'screen', revision: 1 } }],
+    floorId: 's', presentation: { peerId: 's', name: 'Alumno', revision: 1 } }
+  const teacher = { room, remotes: new Map([['s', { stream: camera, presentation: stream }]]) }
+  assert.equal(meetingPresentation('teacher', {}, teacher).stream, stream)
+  const viewer = { room, peerId: 'other', local: camera, remotes: new Map([['t', { stream: 'cámara docente', presentation: stream }], ['s', { stream: camera }]]) }
+  assert.equal(meetingPresentation('student', {}, viewer).stream, stream)
+  const tiles = meetingParticipants('student', { name: 'Otro' }, viewer)
+  assert.equal(tiles[0].stream, null)
+  assert.ok(!tiles.some(tile => tile.id === 's'))
+  const presenter = { ...viewer, peerId: 's', sharing: true, presentation: stream }
+  assert.equal(meetingPresentation('student', {}, presenter).stream, stream)
+  assert.equal(meetingParticipants('student', { name: 'Alumno' }, presenter)[0].stream, null)
+  room.presentation = null
+  assert.equal(meetingPresentation('student', {}, viewer).stream, null)
 })

@@ -27,7 +27,9 @@ export function meetingParticipants(role, user, view) {
   const self = { id: 'self', name: `${user.name} (tú)`, stream: view?.local || null, self: true,
     detail: role === 'teacher' ? 'Maestro' : 'Solo el maestro ve tu cámara' }
   if (role === 'teacher') return [self, ...(view?.room?.students || []).map(student => ({
-    id: student.peerId, name: student.name, stream: view.remotes.get(student.peerId)?.stream || null,
+    id: student.peerId, name: student.name,
+    stream: student.video?.source === 'off' ? null : (student.video?.source === 'screen' ? view.remotes.get(student.peerId)?.presentation : view.remotes.get(student.peerId)?.stream) || null,
+    videoRevision: student.video?.revision || 0, screen: student.video?.source === 'screen',
     hand: student.hand, floor: view.room.floorId === student.peerId, detail: student.hand ? 'Pide la palabra' : view.room.floorId === student.peerId ? 'Tiene la palabra' : 'Alumno'
   }))]
   const teacher = view?.room?.teacher
@@ -39,4 +41,21 @@ export function meetingParticipants(role, user, view) {
 export function focusedParticipant(participants, pinnedId, floorId) {
   return participants.find(item => item.id === pinnedId) || participants.find(item => item.id === floorId) ||
     participants.find(item => !item.self) || participants[0]
+}
+
+// La presentación se comparte con el grupo; las cámaras de compañeros siguen siendo privadas.
+export function meetingPresentation(role, user, view) {
+  const shared = view?.room?.presentation
+  if (view?.sharing) return { stream: view.presentation, label: 'Tu presentación', revision: 'own-screen' }
+  if (shared) {
+    const own = shared.peerId === view?.peerId
+    const peer = role === 'teacher' ? shared.peerId : view.room.teacher.peerId
+    const remote = view.remotes.get(peer)
+    const stream = shared.peerId === view.room.teacher.peerId ? remote?.stream : remote?.presentation
+    return { stream: own ? null : stream || null,
+      label: `${shared.name} / presentación`, revision: `${shared.peerId}:${shared.revision}` }
+  }
+  const teacher = view?.room?.teacher
+  return { stream: role === 'teacher' || view?.room?.teacherVideo?.source === 'off' ? null : view?.remotes.get(teacher?.peerId)?.stream || null,
+    label: role === 'teacher' ? 'Tu presentación' : 'Maestro / presentación', revision: view?.room?.teacherVideo?.revision || 0 }
 }

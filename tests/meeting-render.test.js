@@ -76,17 +76,18 @@ async function click(tree, label) {
 async function render(t, role = 'teacher', mediaDevices) {
   const { document, events, restore } = environment(t, mediaDevices)
   let exits = 0, fullscreenRequests = 0
-  const audioCalls = []
+  const audioCalls = [], videoNodes = [], audioNodes = []
+  const createVideoMock = () => { const node = { srcObject: null, play: async () => {}, pause() {}, load() {} }; videoNodes.push(node); return node }
   const main = { async requestFullscreen() { fullscreenRequests++; document.fullscreenElement = main; events.get('fullscreenchange')?.() } }
   let tree
   await act(async () => { tree = Renderer.create(React.createElement(ThemeProvider, null,
     React.createElement(Meeting, { role, user: { name: role === 'teacher' ? 'Docente Demo' : 'Alumno Demo' },
       subject: { id: 'prog1', name: 'Programación I', code: 'SIS-101' }, onExit: () => { exits++ } })), {
       createNodeMock: element => element.type === 'main' ? main : element.type === 'dialog' ? { showModal() {}, close() {} } :
-        element.type === 'audio' ? { srcObject: null, setSinkId: async id => audioCalls.push(['sink', id]), play: async () => { audioCalls.push(['play']) }, pause: () => audioCalls.push(['pause']) } :
-        element.type === 'video' ? { srcObject: null, play: async () => {}, pause() {} } : { focus() {} } }) })
+        element.type === 'audio' ? (() => { const node = { srcObject: null, setSinkId: async id => audioCalls.push(['sink', id]), play: async () => { audioCalls.push(['play']) }, pause: () => audioCalls.push(['pause']) }; audioNodes.push(node); return node })() :
+        element.type === 'video' ? createVideoMock() : { focus() {} } }) })
   t.after(async () => { try { await act(async () => tree.unmount()) } finally { restore() } })
-  return { tree, document, audioCalls, lastCall: () => TestCall.instances.at(-1), exits: () => exits, fullscreenRequests: () => fullscreenRequests }
+  return { tree, document, audioCalls, videoNodes, audioNodes, lastCall: () => TestCall.instances.at(-1), exits: () => exits, fullscreenRequests: () => fullscreenRequests }
 }
 
 test('aula: cambiar de vista, fijar y ampliar no reinicia la llamada', async t => {
@@ -175,7 +176,7 @@ test('aula: el alumno no renderiza videos de otros alumnos al cambiar la distrib
   await click(tree, 'Mosaico')
   const tiles = tree.root.findAllByType('article')
   assert.deepEqual(tiles.map(item => item.props['aria-label']), ['Docente Demo', 'Alumno Demo (tú)'])
-  assert.equal(button(tree, 'Compartir pantalla'), undefined)
+  assert.equal(button(tree, 'Compartir pantalla').props.disabled, false)
   await click(tree, 'Enfoque')
   assert.equal(lastCall().stops, 0)
 })
@@ -286,3 +287,105 @@ test('presentación: el alumno retira el video al finalizar y recupera la vista 
   await act(async () => { call.state.room.teacherVideo = { source: 'camera', revision: 3 }; call.emit() })
   assert.equal(tree.root.findByProps({ 'aria-label': 'Videos de la clase' }).props['data-layout'], 'focus')
 })
+
+
+test('aula alumno: Compartir pantalla se habilita con turno y vuelve a su vista al detener', async t => {
+  const { tree, lastCall } = await render(t, 'student')
+  await click(tree, 'Entrar a clase')
+  const call = lastCall()
+  await act(async () => { call.state.room.floorId = null; call.emit() })
+  assert.equal(button(tree, 'Compartir pantalla').props.disabled, true)
+  await act(async () => { call.state.room.floorId = 'a'; call.emit() })
+  assert.equal(button(tree, 'Compartir pantalla').props.disabled, false)
+  await click(tree, 'Compartir pantalla')
+  assert.equal(tree.root.findByProps({ 'aria-label': 'Videos de la clase' }).props['data-layout'], 'presentation')
+  assert.ok(text(tree.root).includes('Tu presentación'))
+  await click(tree, 'Dejar de compartir')
+  assert.equal(tree.root.findByProps({ 'aria-label': 'Videos de la clase' }).props['data-layout'], 'focus')
+  await act(async () => { call.state.room.teacherVideo = { source: 'screen' }; call.emit() })
+  assert.equal(button(tree, 'Compartir pantalla').props.disabled, true)
+  assert.equal(call.stops, 0)
+})
+
+test('aula docente: ve la presentación autorizada del alumno y vuelve al mosaico al terminar', async t => {
+  const { tree, lastCall } = await render(t)
+  await click(tree, 'Iniciar clase')
+  const call = lastCall()
+  await act(async () => {
+    call.state.remotes.set('a', { stream: { getVideoTracks: () => [] }, presentation: { getVideoTracks: () => [] } })
+    call.state.room.students[0].video = { source: 'screen', revision: 1 }
+    call.state.room.presentation = { peerId: 'a', name: 'Alumno Demo', revision: 1 }
+    call.emit()
+  })
+  assert.equal(tree.root.findByProps({ 'aria-label': 'Videos de la clase' }).props['data-layout'], 'presentation')
+  assert.ok(text(tree.root).includes('Alumno Demo / presentación'))
+  await act(async () => {
+    call.state.room.presentation = null
+    call.state.room.students[0].video = { source: 'off', revision: 2 }
+    call.emit()
+  })
+  assert.equal(tree.root.findByProps({ 'aria-label': 'Videos de la clase' }).props['data-layout'], 'grid')
+  const tile = tree.root.findAllByType('article').find(node => node.props['aria-label'] === 'Alumno Demo')
+  assert.ok(text(tile).includes('Cámara apagada'))
+  assert.equal(call.stops, 0)
+})
+
+for (const role of ['teacher', 'student']) {
+  test(`aula ${role}: apaga el video remoto y despega srcObject aunque la pista siga presente`, async t => {
+    const { tree, lastCall, videoNodes } = await render(t, role)
+    await click(tree, role === 'teacher' ? 'Iniciar clase' : 'Entrar a clase')
+    const call = lastCall()
+    const stream = { getVideoTracks: () => [] }
+    await act(async () => {
+      if (role === 'teacher') { call.state.remotes.set('a', { stream }); call.state.room.students[0].video = { source: 'camera', revision: 1 } }
+      else { call.state.remotes.set('t', { stream }); call.state.room.teacherVideo = { source: 'camera', revision: 1 } }
+      call.emit()
+    })
+    const oldVideo = videoNodes.find(node => node.srcObject === stream)
+    assert.ok(oldVideo)
+    await act(async () => {
+      if (role === 'teacher') call.state.room.students[0].video = { source: 'off', revision: 2 }
+      else call.state.room.teacherVideo = { source: 'off', revision: 2 }
+      call.emit()
+    })
+    assert.equal(oldVideo.srcObject, null)
+    const name = role === 'teacher' ? 'Alumno Demo' : 'Docente Demo'
+    const tile = tree.root.findAllByType('article').find(node => node.props['aria-label'] === name)
+    assert.ok(text(tile).includes('Cámara apagada'))
+    assert.ok(tree.root.findAllByType('audio').length, 'Apagar video no elimina el reproductor de voz')
+    assert.equal(call.stops, 0)
+  })
+}
+
+for (const role of ['teacher', 'student']) {
+  test(`aula ${role}: informa si la pantalla incluye audio y no reproduce su propia captura`, async t => {
+    const { tree, lastCall, audioNodes } = await render(t, role)
+    await click(tree, role === 'teacher' ? 'Iniciar clase' : 'Entrar a clase')
+    const call = lastCall(), stream = { getVideoTracks: () => [] }
+    await act(async () => { call.state.sharing = true; call.state.presentation = stream; call.state.screenAudio = true; call.emit() })
+    assert.ok(text(tree.root).includes('Compartiendo pantalla con audio'))
+    assert.ok(!audioNodes.some(node => node.srcObject === stream))
+    await act(async () => { call.state.screenAudio = false; call.emit() })
+    assert.ok(text(tree.root).includes('Compartiendo sin audio'))
+    assert.equal(call.stops, 0)
+  })
+}
+
+for (const role of ['teacher', 'student']) {
+  test(`aula ${role}: reproduce la presentación remota y libera su audio al terminar`, async t => {
+    const { tree, lastCall, audioNodes } = await render(t, role)
+    await click(tree, role === 'teacher' ? 'Iniciar clase' : 'Entrar a clase')
+    const call = lastCall(), stream = { getVideoTracks: () => [] }
+    const presenter = role === 'teacher' ? 'a' : 'b'
+    await act(async () => {
+      call.state.room.presentation = { peerId: presenter, name: 'Presentador', revision: 1 }
+      call.state.remotes.set(role === 'teacher' ? presenter : 't', { presentation: stream })
+      call.state.outputId = 'headphones'; call.emit()
+    })
+    const audio = audioNodes.find(node => node.srcObject === stream)
+    assert.ok(audio, 'El audio compartido tiene reproductor independiente.')
+    await act(async () => { call.state.room.presentation = null; call.emit() })
+    assert.equal(audio.srcObject, null)
+    assert.equal(call.stops, 0)
+  })
+}
