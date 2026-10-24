@@ -29,6 +29,8 @@ class Peer {
       this.addTransceiver('video', { direction: 'recvonly' })
       this.addTransceiver('audio', { direction: 'recvonly' })
       this.addTransceiver('audio', { direction: 'recvonly' })
+      this.addTransceiver('video', { direction: 'recvonly' })
+      this.addTransceiver('audio', { direction: 'recvonly' })
     }
     this.remoteDescription = value
   }
@@ -36,18 +38,20 @@ class Peer {
   close() { this.closed = true }
 }
 
-test('WebRTC: reserva video, audio docente y audio del turno aunque estén apagados', async () => {
+test('WebRTC: reserva cámara, pantalla y audios aunque estén apagados', async () => {
   const messages = []
   const peer = new ClassPeer({ teacher: true, send: x => messages.push(x), onStreams() {}, onFailure() {}, Peer, Stream })
   await peer.offer(null, null, null)
-  assert.deepEqual(peer.pc.slots.map(s => s.direction), ['sendrecv', 'sendrecv', 'sendonly'])
+  assert.deepEqual(peer.pc.slots.map(s => s.direction), ['sendrecv', 'sendrecv', 'sendonly', 'sendrecv', 'sendrecv'])
   assert.equal(messages[0].kind, 'offer')
   const camera = new Track('video'), mic = new Track('audio'), floor = new Track('audio')
   await peer.tracks(camera, mic, floor)
-  assert.deepEqual(peer.pc.slots.map(s => s.sender.track), [camera, mic, floor])
+  assert.deepEqual(peer.pc.slots.map(s => s.sender.track), [camera, mic, floor, null, null])
   const screen = new Track('video')
   await peer.tracks(screen, mic, null)
-  assert.deepEqual(peer.pc.slots.map(s => s.sender.track), [screen, mic, null])
+  assert.deepEqual(peer.pc.slots.map(s => s.sender.track), [screen, mic, null, null, null])
+  await peer.tracks(camera, mic, floor, screen)
+  assert.deepEqual(peer.pc.slots.map(s => s.sender.track), [camera, mic, floor, screen, null])
   assert.equal(messages.length, 1, 'Cambiar a pantalla no necesita otra oferta.')
   peer.close()
   assert.equal(peer.pc.closed, true)
@@ -59,14 +63,18 @@ test('WebRTC: conserva ICE adelantado y responde con canales correctos', async (
   const ice = { candidate: 'candidate:early' }
   await peer.receive({ kind: 'ice', candidate: ice })
   assert.equal(peer.pc.ice.length, 0)
-  const camera = new Track('video')
-  await peer.receive({ kind: 'offer', sdp: 'offer' }, camera, null)
+  const camera = new Track('video'), screen = new Track('video')
+  await peer.receive({ kind: 'offer', sdp: 'offer' }, camera, null, screen)
   assert.deepEqual(peer.pc.ice, [ice])
-  assert.deepEqual(peer.pc.slots.map(s => s.direction), ['sendrecv', 'sendrecv', 'recvonly'])
+  assert.deepEqual(peer.pc.slots.map(s => s.direction), ['sendrecv', 'sendrecv', 'recvonly', 'sendrecv', 'sendrecv'])
   assert.equal(peer.pc.slots[0].sender.track, camera)
+  assert.equal(peer.pc.slots[3].sender.track, screen)
   assert.equal(messages[0].kind, 'answer')
   assert.equal(streams[0][0].getTracks().length, 2)
   assert.equal(streams[0][1].getAudioTracks().length, 1)
+  assert.equal(streams[0][2].getVideoTracks().length, 1)
+  assert.equal(streams[0][2].getAudioTracks().length, 1)
+  assert.notEqual(streams[0][0].getVideoTracks()[0], streams[0][2].getVideoTracks()[0])
 })
 
 function environment(t, getUserMedia) {
@@ -97,7 +105,7 @@ test('dispositivos: entrar no captura y un alumno sin turno no solicita micrófo
   assert.equal(requests, 0)
   await assert.rejects(live.microphone(true), /Pide la palabra/)
   assert.equal(requests, 0)
-  await assert.rejects(live.shareScreen(true), /Solo el maestro/)
+  await assert.rejects(live.shareScreen(true), /Pide la palabra/)
   live.stop()
 })
 
@@ -186,7 +194,7 @@ test('clase: finalizar desde el servidor libera los dispositivos y muestra el mo
 })
 
 test('presentación: detener sin cámara avisa apagado; con cámara avisa volver a cámara', async t => {
-  environment(t, async constraints => new Stream([new Track(constraints.audio ? 'audio' : 'video')]))
+  environment(t, async constraints => new Stream([new Track(constraints.video ? 'video' : 'audio')]))
   const { live } = call('teacher')
   const messages = []
   live.socket = { readyState: 1, send: raw => messages.push(JSON.parse(raw)), close() {} }
@@ -222,4 +230,223 @@ test('presentación: recibir el estado propio no genera un bucle de mensajes', a
   await live.receive({ ...snapshot, teacherVideo: { source: 'off', revision: 1 } })
   assert.equal(messages.filter(message => message.type === 'media').length, 1)
   live.stop()
+})
+
+for (const role of ['teacher', 'student']) {
+  test(`cámara ${role}: anuncia apagado antes de que termine replaceTrack`, async t => {
+    const camera = new Track('video')
+    environment(t, async () => new Stream([camera]))
+    const { live, states } = call(role)
+    const messages = []
+    live.socket = { readyState: 1, send: raw => messages.push(JSON.parse(raw)), close() {} }
+    await live.cameraEnabled(true)
+    let finish
+    live.updateTracks = () => new Promise(resolve => { finish = resolve })
+    const stopping = live.cameraEnabled(false)
+    assert.equal(camera.stops, 1)
+    assert.equal(states.at(-1).local, null)
+    assert.equal(messages.at(-1).source, 'off')
+    finish(); await stopping; live.stop()
+  })
+}
+
+test('pantalla alumno: captura con turno y vuelve a su cámara al detener', async t => {
+  const camera = new Track('video'), screen = new Track('video')
+  let requests = 0
+  environment(t, async () => new Stream([requests++ ? screen : camera]))
+  const { live } = call()
+  live.state.floorId = 'me'
+  const messages = []
+  live.socket = { readyState: 1, send: raw => messages.push(JSON.parse(raw)), close() {} }
+  await live.cameraEnabled(true); await live.shareScreen(true)
+  assert.equal(live.videoTrack(), camera)
+  assert.equal(live.outboundScreen('teacher'), screen)
+  assert.equal(live.camera.getVideoTracks()[0], camera)
+  await live.shareScreen(false)
+  assert.equal(live.videoTrack(), camera)
+  assert.equal(screen.stops, 1)
+  assert.equal(camera.stops, 0)
+  assert.deepEqual(messages.filter(m => m.type === 'media').map(m => m.source), ['camera', 'screen', 'camera'])
+  live.stop()
+})
+
+test('pantalla alumno: revocar el turno libera pantalla y conserva cámara', async t => {
+  const camera = new Track('video'), screen = new Track('video')
+  let requests = 0
+  environment(t, async () => new Stream([requests++ ? screen : camera]))
+  const { live } = call(); live.state.floorId = 'me'
+  await live.cameraEnabled(true); await live.shareScreen(true)
+  await live.receive({ type: 'room', teacher: { peerId: 'teacher' }, students: [{ peerId: 'me', video: { source: 'off' } }], floorId: null })
+  assert.equal(live.screen, null)
+  assert.equal(screen.stops, 1)
+  assert.equal(live.videoTrack(), camera)
+  live.stop()
+})
+
+test('pantalla alumno: pierde y recupera el turno durante el permiso, no publica la captura antigua', async t => {
+  let resolve
+  const screen = new Track('video')
+  environment(t, () => new Promise(r => { resolve = r }))
+  const { live } = call(); live.state.floorId = 'me'
+  const waiting = live.shareScreen(true)
+  await live.receive({ type: 'room', teacher: { peerId: 'teacher' }, students: [{ peerId: 'me' }], floorId: null })
+  await live.receive({ type: 'room', teacher: { peerId: 'teacher' }, students: [{ peerId: 'me' }], floorId: 'me' })
+  resolve(new Stream([screen])); await waiting
+  assert.equal(screen.stops, 1)
+  assert.ok(!live.screen)
+  live.stop()
+})
+
+test('pantalla alumno: salir durante el permiso libera la captura recién aceptada', async t => {
+  let resolve
+  const screen = new Track('video')
+  environment(t, () => new Promise(r => { resolve = r }))
+  const { live } = call(); live.state.floorId = 'me'
+  const waiting = live.shareScreen(true)
+  live.stop(); resolve(new Stream([screen])); await waiting
+  assert.equal(screen.stops, 1)
+  assert.equal(live.screen, null)
+})
+
+test('pantalla alumno: el maestro tiene prioridad y el botón nativo también detiene la pantalla', async t => {
+  let requests = 0
+  const screen = new Track('video')
+  environment(t, async () => { requests++; return new Stream([screen]) })
+  const { live } = call(); live.state.floorId = 'me'; live.state.teacherVideo = { source: 'screen' }
+  await assert.rejects(live.shareScreen(true), /El maestro está presentando/)
+  assert.equal(requests, 0)
+  live.state.teacherVideo.source = 'camera'
+  await live.shareScreen(true)
+  screen.onended(); await new Promise(resolve => setImmediate(resolve))
+  assert.equal(live.screen, null)
+  assert.equal(screen.stops, 1)
+  live.stop()
+})
+
+test('reenvío: comparte la pantalla autorizada, nunca otra cámara ni el video al propio presentador', async t => {
+  environment(t, async () => new Stream())
+  const { live } = call('teacher')
+  const teacherCamera = new Track('video'), shared = new Track('video'), privateCamera = new Track('video')
+  live.camera = new Stream([teacherCamera])
+  live.remote.set('me', { stream: new Stream([privateCamera]), presentation: new Stream([shared]) })
+  live.remote.set('other', { stream: new Stream([privateCamera]) })
+  live.state.students = [{ peerId: 'me', video: { source: 'screen' } }, { peerId: 'other', video: { source: 'camera' } }]
+  live.state.floorId = 'me'
+  assert.equal(live.outboundScreen('other'), shared)
+  assert.equal(live.outboundScreen('me'), null)
+  let outgoing
+  live.peers.set('other', { tracks: async (video, audio, floor, screen) => { assert.equal(video, teacherCamera); outgoing = screen }, close() {} })
+  await live.updateTracks(); assert.equal(outgoing, shared)
+  live.state.students[0].video.source = 'off'
+  await live.updateTracks(); assert.equal(outgoing, null)
+  live.state.floorId = 'other'
+  assert.equal(live.outboundScreen('me'), null)
+  live.stop()
+})
+
+test('cámara remota: el aviso de apagado llega a la UI antes de esperar replaceTrack', async t => {
+  environment(t, async () => new Stream())
+  const { live, states } = call('teacher')
+  let finish
+  live.peers.set('me', { tracks: () => new Promise(resolve => { finish = resolve }), close() {} })
+  const updating = live.receive({ type: 'room', teacher: { peerId: 'teacher' },
+    students: [{ peerId: 'me', video: { source: 'off', revision: 2 } }], floorId: null })
+  assert.equal(states.at(-1).room.students[0].video.source, 'off')
+  finish(); await updating; live.stop()
+})
+
+for (const role of ['teacher', 'student']) {
+  test(`audio compartido ${role}: solicita audio y lo envía separado del micrófono`, async t => {
+    const video = new Track('video'), sound = new Track('audio'), mic = new Track('audio')
+    let constraints
+    environment(t, async options => { constraints = options; return new Stream([video, sound]) })
+    const { live, states } = call(role); live.state.floorId = 'me'
+    let sent
+    live.peers.set('receiver', { tracks: async (...tracks) => { sent = tracks }, close() {} })
+    await live.shareScreen(true)
+    assert.equal(constraints.audio, true)
+    assert.equal(constraints.windowAudio, 'window')
+    assert.equal(states.at(-1).screenAudio, true)
+    assert.equal(sent[1], undefined, 'No captura ni abre el micrófono al compartir.')
+    assert.equal(sent[4], sound)
+    live.mic = mic
+    await live.updateTracks()
+    assert.equal(sent[1], mic)
+    assert.equal(sent[4], sound)
+    await live.microphone(false)
+    assert.equal(sent[1], null)
+    assert.equal(sent[4], sound, 'Silenciar la voz conserva el audio compartido.')
+    await live.shareScreen(false)
+    assert.equal(sent[4], null)
+    assert.equal(sound.stops, 1)
+    assert.equal(video.stops, 1)
+    assert.equal(states.at(-1).screenAudio, false)
+    live.stop()
+  })
+}
+
+test('audio compartido: una fuente sin pista de audio permite continuar presentando', async t => {
+  const video = new Track('video')
+  environment(t, async () => new Stream([video]))
+  const { live, states } = call('teacher')
+  await live.shareScreen(true)
+  assert.equal(states.at(-1).sharing, true)
+  assert.equal(states.at(-1).screenAudio, false)
+  assert.equal(live.outboundScreenAudio('other'), null)
+  live.stop()
+})
+
+test('audio compartido: reenvía solo al grupo autorizado y lo retira al cambiar de turno', async t => {
+  environment(t, async () => new Stream())
+  const { live } = call('teacher')
+  const sound = new Track('audio'), mic = new Track('audio')
+  live.remote.set('me', { stream: new Stream([mic]), presentation: new Stream([new Track('video'), sound]) })
+  live.state.students[0].video = { source: 'screen' }; live.state.floorId = 'me'
+  assert.equal(live.outboundScreenAudio('other'), sound)
+  assert.equal(live.outboundScreenAudio('me'), null, 'No devuelve el sonido a su emisor.')
+  live.state.floorId = null
+  assert.equal(live.outboundScreenAudio('other'), null)
+  live.state.floorId = 'me'; live.state.students[0].video.source = 'camera'
+  assert.equal(live.outboundScreenAudio('other'), null, 'No reenvía micrófonos por el canal de pantalla.')
+  live.stop()
+})
+
+test('audio compartido: perder la palabra libera el audio y el video de la captura', async t => {
+  const video = new Track('video'), sound = new Track('audio')
+  environment(t, async () => new Stream([video, sound]))
+  const { live } = call(); live.state.floorId = 'me'
+  await live.shareScreen(true)
+  await live.receive({ type: 'room', teacher: { peerId: 'teacher' }, students: [{ peerId: 'me', video: { source: 'off' } }], floorId: null })
+  assert.equal(live.screen, null)
+  assert.equal(sound.stops, 1)
+  assert.equal(video.stops, 1)
+  assert.equal(live.outboundScreenAudio('teacher'), null)
+  live.stop()
+})
+
+test('audio compartido: terminar únicamente la pista de audio conserva el video', async t => {
+  const video = new Track('video'), sound = new Track('audio')
+  environment(t, async () => new Stream([video, sound]))
+  const { live, states } = call('teacher')
+  let outgoing
+  live.peers.set('other', { tracks: async (...tracks) => { outgoing = tracks }, close() {} })
+  await live.shareScreen(true)
+  sound.readyState = 'ended'; sound.onended()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(states.at(-1).screenAudio, false)
+  assert.equal(states.at(-1).sharing, true)
+  assert.equal(outgoing[4], null)
+  assert.equal(video.stops, 0)
+  live.stop()
+})
+
+test('WebRTC: envía audio compartido por su propio canal al negociar y conserva las voces', async () => {
+  const camera = new Track('video'), mic = new Track('audio'), sound = new Track('audio'), screen = new Track('video')
+  const teacher = new ClassPeer({ teacher: true, send() {}, onStreams() {}, onFailure() {}, Peer, Stream })
+  await teacher.offer(camera, mic, null, screen, sound)
+  assert.deepEqual(teacher.pc.slots.map(slot => slot.sender.track), [camera, mic, null, screen, sound])
+  const student = new ClassPeer({ teacher: false, send() {}, onStreams() {}, onFailure() {}, Peer, Stream })
+  await student.receive({ kind: 'offer', sdp: 'offer' }, camera, mic, screen, sound)
+  assert.deepEqual(student.pc.slots.map(slot => slot.sender.track), [camera, mic, null, screen, sound])
+  teacher.close(); student.close()
 })

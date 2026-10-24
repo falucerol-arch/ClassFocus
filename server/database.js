@@ -444,8 +444,20 @@ CREATE TABLE IF NOT EXISTS classroom_connections (
 );
 
 
--- Evitar más de una conexión Google por usuario.
-CREATE UNIQUE INDEX IF NOT EXISTS
+-- Un usuario puede conectar varias cuentas Google; google_sub sigue siendo único.
+-- Convertir únicamente el índice antiguo que impedía esa funcionalidad.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_index
+    WHERE indexrelid = to_regclass('idx_classroom_connections_user')
+      AND indisunique
+  ) THEN
+    DROP INDEX idx_classroom_connections_user;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS
 idx_classroom_connections_user
 ON classroom_connections(user_id);
 

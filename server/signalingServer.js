@@ -78,13 +78,32 @@ export function createSignalingServer({
         socket.user.name,
 
       hand:
-        !!socket.hand
+        !!socket.hand,
+
+      video:
+        socket.video || { source: 'off', revision: 0 }
     })
 
 
   // ===================================================
   // ESTADO DE SALA
   // ===================================================
+
+  // La presentación del alumno se publica al grupo solo mientras conserva el turno.
+  const presentation = room => {
+    if (room.teacherVideo.source === 'screen') return { peerId: room.teacher.peerId, name: room.teacher.user.name, revision: room.teacherVideo.revision }
+    const student = room.students.get(room.floorId)
+    return student?.video?.source === 'screen'
+      ? { peerId: student.peerId, name: student.user.name, revision: student.video.revision } : null
+  }
+  const setFloor = (room, peerId) => {
+    const previous = room.students.get(room.floorId)
+    if (previous && room.floorId !== peerId && previous.video?.source === 'screen') {
+      previous.video = { source: 'off', revision: previous.video.revision + 1 }
+    }
+    room.floorId = peerId
+  }
+
 
   const snapshot =
     room => ({
@@ -106,6 +125,9 @@ export function createSignalingServer({
 
       floorId:
         room.floorId,
+
+      presentation:
+        presentation(room),
 
       teacherVideo:
         room.teacherVideo
@@ -564,8 +586,7 @@ export function createSignalingServer({
       room.floorId ===
       socket.peerId
     ) {
-      room.floorId =
-        null
+      setFloor(room, null)
     }
 
 
@@ -927,45 +948,28 @@ export function createSignalingServer({
       socket
 
 
-    // ===================================================
-    // VIDEO DEL MAESTRO
-    // ===================================================
+    // ---------------------------------------------------
+    // VIDEO Y PRESENTACIONES AUTORIZADAS
+    // ---------------------------------------------------
 
-    if (
-      message.type ===
-        'media' &&
-
-      teacher
-    ) {
-
-      if (
-        ![
-          'off',
-          'camera',
-          'screen'
-        ].includes(
-          message.source
-        )
-      ) {
-        throw new Error(
-          'Estado de video inválido.'
-        )
+    if (message.type === 'media') {
+      if (!['off', 'camera', 'screen'].includes(message.source)) throw new Error('Estado de video inválido.')
+      if (!teacher && message.source === 'screen' && room.floorId !== socket.peerId) {
+        throw new Error('Pide la palabra y espera la autorización del maestro para presentar.')
       }
-
-
-      room.teacherVideo = {
-        source:
-          message.source,
-
-        revision:
-          room.teacherVideo
-            .revision + 1
+      if (!teacher && message.source === 'screen' && room.teacherVideo.source === 'screen') {
+        throw new Error('El maestro está presentando. Espera a que termine para compartir tu pantalla.')
       }
-
-
+      if (teacher) {
+        room.teacherVideo = { source: message.source, revision: room.teacherVideo.revision + 1 }
+        // El docente tiene prioridad al comenzar una presentación.
+        if (message.source === 'screen') {
+          const student = room.students.get(room.floorId)
+          if (student?.video?.source === 'screen') student.video = { source: 'off', revision: student.video.revision + 1 }
+        }
+      } else socket.video = { source: message.source, revision: (socket.video?.revision || 0) + 1 }
       broadcast(room)
     }
-
 
     // ===================================================
     // LEVANTAR MANO
@@ -989,8 +993,7 @@ export function createSignalingServer({
         room.floorId ===
           socket.peerId
       ) {
-        room.floorId =
-          null
+        setFloor(room, null)
       }
 
 
@@ -1023,8 +1026,7 @@ export function createSignalingServer({
       }
 
 
-      room.floorId =
-        message.peerId
+      setFloor(room, message.peerId)
 
 
       if (

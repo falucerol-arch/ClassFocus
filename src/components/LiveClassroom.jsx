@@ -4,7 +4,7 @@ import { FaceAnalyzer } from '../core/FaceAnalyzer'
 import { ArrowLeft, Hand, LayoutGrid, Maximize2, Mic, MicOff, Minimize2, MonitorUp, MoreHorizontal, PanelLeft, PhoneOff, Pin, PinOff, Presentation, UsersRound, Video as VideoIcon, VideoOff, X } from 'lucide-react'
 import ThemeToggle from './ThemeToggle'
 import DevicePreview from './DevicePreview'
-import { classroomError, focusedParticipant, meetingParticipants } from '../services/classroomUi'
+import { classroomError, focusedParticipant, meetingParticipants, meetingPresentation } from '../services/classroomUi'
 import './LiveClassroom.css'
 
 function Video({ stream, label, placeholder = 'Cámara apagada' }) {
@@ -100,7 +100,7 @@ function Tile({ participant, pinned, fullscreen, onPin, onExpand, onManage, comp
   return <article className={`meeting-tile ${participant.floor ? 'has-floor' : ''} ${compact ? 'is-compact' : ''}`} aria-label={participant.name}>
     <Video key={participant.videoRevision || 0} stream={participant.stream} label={participant.name} />
     <div className="meeting-tile-badges">{participant.hand && <span><Hand size={14} /> Pide la palabra</span>}
-      {participant.floor && <span>Tiene la palabra</span>}{pinned && <span><Pin size={13} /> Fijado</span>}</div>
+      {participant.screen && <span><MonitorUp size={14} /> Presentando</span>}{participant.floor && <span>Tiene la palabra</span>}{pinned && <span><Pin size={13} /> Fijado</span>}</div>
     <div className="meeting-tile-tools"><button type="button" title={pinned ? 'Quitar fijación' : 'Fijar video'}
       aria-label={`${pinned ? 'Dejar de fijar' : 'Fijar a'} ${participant.name}`} aria-pressed={pinned} onClick={() => onPin(participant.id)}>
       {pinned ? <PinOff size={16} /> : <Pin size={16} />}</button>
@@ -166,11 +166,11 @@ export default function LiveClassroom({ role, user, subject, onMetric, onExit })
     return () => window.removeEventListener('beforeunload', warn)
   }, [active])
   useEffect(() => {
-    const sharing = teacher ? !!view?.sharing : view?.room?.teacherVideo?.source === 'screen'
+    const sharing = !!view?.sharing || !!view?.room?.presentation || view?.room?.teacherVideo?.source === 'screen'
     if (sharing && !wasSharing.current) { previousLayout.current = layout; setLayout('presentation') }
     if (!sharing && wasSharing.current) setLayout(previousLayout.current)
     wasSharing.current = sharing
-  }, [view?.sharing, view?.room?.teacherVideo?.source, teacher])
+  }, [view?.sharing, view?.room?.presentation?.peerId, view?.room?.teacherVideo?.source])
 
   async function perform(action, kind = 'general') {
     setPending(kind); setError('')
@@ -218,7 +218,10 @@ export default function LiveClassroom({ role, user, subject, onMetric, onExit })
   const speaker = room?.students.find(student => student.peerId === room.floorId)
   const instructor = room && view.remotes.get(room.teacher.peerId)
   const participants = meetingParticipants(role, user, view)
-  const instructorVideo = participants.find(item => !item.self)
+  const presentation = meetingPresentation(role, user, view)
+  const shared = room?.presentation
+  const presentationAudio = shared && shared.peerId !== view?.peerId
+    ? (teacher ? view.remotes.get(shared.peerId)?.presentation : instructor?.presentation) : null
   const focused = focusedParticipant(participants, pinnedId, room?.floorId)
   const raised = room?.students.filter(student => student.hand).length || 0
   const busy = !!pending
@@ -250,9 +253,13 @@ export default function LiveClassroom({ role, user, subject, onMetric, onExit })
         {[[ 'grid', LayoutGrid, 'Mosaico' ], [ 'focus', PanelLeft, 'Enfoque' ], [ 'presentation', Presentation, 'Presentación' ]].map(([id, Icon, label]) =>
           <button type="button" key={id} aria-pressed={layout === id} onClick={() => setLayout(id)}><Icon size={16} /><span>{label}</span></button>)}
       </div><span className="meeting-view-hint">{pinnedId && participants.some(item => item.id === pinnedId) ? 'Video fijado para ti' : teacher ? `${room?.students.length || 0} ${(room?.students.length || 0) === 1 ? 'alumno conectado' : 'alumnos conectados'}` : 'Las cámaras de tus compañeros solo las ve el maestro'}</span></div>
-      {!teacher && myFloor && <div role="status" className="meeting-message is-floor"><Hand size={18} /><span>Tienes la palabra. Activa tu micrófono cuando quieras hablar.</span></div>}
+      {!teacher && myFloor && <div role="status" className="meeting-message is-floor"><Hand size={18} /><span>Tienes la palabra. Puedes activar tu micrófono y presentar tu pantalla.</span></div>}
       {!teacher && speaker && !myFloor && <div className="meeting-speaker">Tiene la palabra: {speaker.name}</div>}
+      {view?.sharing && <div role="status" className="meeting-message"><MonitorUp size={18} /><span>{view.screenAudio
+        ? 'Compartiendo pantalla con audio. El micrófono se controla por separado.'
+        : 'Compartiendo sin audio. Para incluir sonido, elige una pestaña y marca Compartir audio en el navegador. El audio de ventanas depende del navegador y del sistema.'}</span></div>}
       <div className="meeting-audio-permissions">
+        {presentationAudio && <Audio outputId={view?.outputId} stream={presentationAudio} label="el audio de la presentación" />}
         {!teacher && <><Audio outputId={view?.outputId} stream={instructor?.stream} label="al maestro" /><Audio outputId={view?.outputId} stream={instructor?.floor} label="el turno de palabra" /></>}
         {teacher && speaker && <Audio outputId={view?.outputId} key={speaker.peerId} stream={view.remotes.get(speaker.peerId)?.stream} label={`a ${speaker.name}`} />}
       </div>
@@ -260,8 +267,8 @@ export default function LiveClassroom({ role, user, subject, onMetric, onExit })
         <section className={`meeting-stage view-${layout}`} aria-label="Videos de la clase" data-layout={layout}>
           {layout === 'grid' ? <div className="meeting-gallery">{participants.map(participant => <Tile key={participant.id} participant={participant} pinned={pinnedId === participant.id} fullscreen={fullscreen} onPin={pin} onExpand={expand} onManage={teacher ? manage : undefined} />)}</div> : <>
             <div className="meeting-focus">
-              {layout === 'presentation' ? <div className="meeting-presentation"><Video key={teacher ? 'own-screen' : instructorVideo?.videoRevision || 0} stream={teacher ? view?.presentation : instructorVideo?.stream}
-                label={teacher ? 'Tu presentación' : 'Maestro / presentación'} placeholder={teacher ? 'Comparte una ventana para presentar' : room?.teacherVideo?.source === 'off' ? 'Cámara del maestro apagada' : 'Esperando el video del maestro'} /></div> :
+              {layout === 'presentation' ? <div className="meeting-presentation"><Video key={presentation.revision} stream={presentation.stream}
+                label={presentation.label} placeholder={teacher ? 'Comparte una ventana para presentar' : room?.teacherVideo?.source === 'off' ? 'Cámara del maestro apagada' : 'Esperando el video del maestro'} /></div> :
                 <Tile participant={focused} pinned={pinnedId === focused.id} fullscreen={fullscreen} onPin={pin} onExpand={expand} onManage={teacher ? manage : undefined} />}
             </div>
             <div className="meeting-filmstrip" aria-label="Otros videos">{participants.filter(participant => layout === 'presentation' || participant.id !== focused.id).map(participant =>
@@ -296,9 +303,10 @@ export default function LiveClassroom({ role, user, subject, onMetric, onExit })
             disabled={!view?.joined || busy || (!teacher && !myFloor)} onClick={() => perform(() => controller.current.microphone(!view.microphone), 'microphone')} />
           <Control icon={view?.local ? VideoIcon : VideoOff} label={view?.local ? 'Apagar cámara' : 'Activar cámara'} pressed={!!view?.local}
             disabled={!view?.joined || busy} onClick={() => perform(() => controller.current.cameraEnabled(!view.local), 'camera')} />
-          {teacher ? <Control icon={MonitorUp} label={view?.sharing ? 'Dejar de compartir' : 'Compartir pantalla'} pressed={!!view?.sharing}
-            disabled={!view?.joined || busy} onClick={() => perform(() => controller.current.shareScreen(!view.sharing), 'screen')} /> :
-            <Control icon={Hand} label={myFloor ? 'Devolver la palabra' : me?.hand ? 'Bajar la mano' : 'Levantar la mano'} pressed={!!me?.hand || myFloor}
+          <Control icon={MonitorUp} label={view?.sharing ? 'Dejar de compartir' : 'Compartir pantalla'} pressed={!!view?.sharing}
+            disabled={!view?.joined || busy || (!teacher && !view?.sharing && (!myFloor || room?.teacherVideo?.source === 'screen'))}
+            onClick={() => perform(() => controller.current.shareScreen(!view.sharing), 'screen')} />
+          {!teacher && <Control icon={Hand} label={myFloor ? 'Devolver la palabra' : me?.hand ? 'Bajar la mano' : 'Levantar la mano'} pressed={!!me?.hand || myFloor}
               disabled={!view?.joined} onClick={() => controller.current.hand(!me?.hand && !myFloor)} />}
           <Control icon={PhoneOff} label={teacher ? 'Finalizar clase' : 'Salir de clase'} danger onClick={requestExit} />
         </div>

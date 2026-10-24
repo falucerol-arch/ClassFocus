@@ -120,6 +120,39 @@ test('clases: salas autenticadas, aislamiento, turnos, bajas y cierre', async t 
     assert.equal('teacherVideo' in listing.classes[0], false, 'Los avisos no necesitan datos de la transmisión.')
     observer.socket.close()
   })
+  await t.test('pantalla del alumno: exige turno, se publica al grupo y se retira al revocarlo', async () => {
+    const broadcast = async sender => {
+      const rooms = await Promise.all([teacher.box.next('room'), student.box.next('room'), second.box.next('room')])
+      assert.deepEqual(rooms[1], rooms[0]); assert.deepEqual(rooms[2], rooms[0]); return rooms[0]
+    }
+    teacher.box.send({ type: 'floor', peerId: student.id }); await broadcast()
+    student.box.send({ type: 'media', source: 'camera' })
+    const camera = await broadcast()
+    assert.equal(camera.students.find(s => s.peerId === student.id).video.source, 'camera')
+    student.box.send({ type: 'media', source: 'off' })
+    const off = await broadcast()
+    assert.equal(off.students.find(s => s.peerId === student.id).video.source, 'off')
+    assert.ok(off.students.find(s => s.peerId === student.id).video.revision > camera.students.find(s => s.peerId === student.id).video.revision)
+    student.box.send({ type: 'media', source: 'screen' })
+    assert.equal((await broadcast()).presentation.peerId, student.id)
+    teacher.box.send({ type: 'floor', peerId: null })
+    const revoked = await broadcast()
+    assert.equal(revoked.presentation, null)
+    assert.equal(revoked.students.find(s => s.peerId === student.id).video.source, 'off')
+    teacher.box.send({ type: 'floor', peerId: student.id }); await broadcast()
+    student.box.send({ type: 'media', source: 'screen' }); await broadcast()
+    student.box.send({ type: 'hand', raised: false })
+    assert.equal((await broadcast()).presentation, null)
+    teacher.box.send({ type: 'floor', peerId: student.id }); await broadcast()
+    student.box.send({ type: 'media', source: 'screen' }); await broadcast()
+    teacher.box.send({ type: 'media', source: 'screen' })
+    const takeover = await broadcast()
+    assert.equal(takeover.presentation.peerId, teacher.id)
+    assert.equal(takeover.students.find(s => s.peerId === student.id).video.source, 'off')
+    teacher.box.send({ type: 'media', source: 'camera' }); await broadcast()
+    teacher.box.send({ type: 'floor', peerId: null }); await broadcast()
+  })
+
   await t.test('el maestro concede y retira la palabra; el alumno puede devolverla', async () => {
     student.box.send({ type: 'hand', raised: true })
     assert.equal((await teacher.box.next('room')).students.find(s => s.peerId === student.id).hand, true)
@@ -151,9 +184,14 @@ test('clases: salas autenticadas, aislamiento, turnos, bajas y cierre', async t 
     await attacker.box.next('joined'); await attacker.box.next('room'); await teacher.box.next('room'); await student.box.next('room')
     const before = { ...server.rooms.get('a').teacherVideo }
     attacker.box.send({ type: 'media', source: 'off' })
-    assert.match((await attacker.box.next('error')).message, /permitida/)
+    const own = await attacker.box.next('room')
+    assert.equal(own.students.find(s => s.peerId === attacker.id).video.source, 'off')
     await teacher.box.next('room'); await student.box.next('room')
     assert.deepEqual(server.rooms.get('a').teacherVideo, before)
+    // Puede anunciar su propia cámara, pero no presentar sin permiso ni alterar al docente.
+    attacker.box.send({ type: 'media', source: 'screen' })
+    assert.match((await attacker.box.next('error')).message, /Pide la palabra/)
+    await teacher.box.next('room'); await student.box.next('room')
   })
   await t.test('la eliminación de matrícula expulsa al alumno', async () => {
     await db.query("DELETE FROM enrollments WHERE student_id=1 AND subject_id='a'")
@@ -180,6 +218,26 @@ test('clases: salas autenticadas, aislamiento, turnos, bajas y cierre', async t 
     await db.query('DELETE FROM app_sessions WHERE user_id=2')
     assert.match((await expiring.box.next('ended')).message, /sesión/)
     assert.equal(server.rooms.size, 0)
+  })
+  await t.test('multirrol: usa el perfil de la sesión y expulsa al cambiarlo durante la llamada', async () => {
+    await db.query("INSERT INTO user_roles(user_id,role) VALUES(2,'student')")
+    await db.query("INSERT INTO enrollments(student_id,teacher_id,subject_id) VALUES(2,4,'b')")
+    tokens.set(2, await auth.issue(2, 'student'))
+    const host = await client(4, 'b')
+    await host.box.next('joined'); await host.box.next('room')
+    // users.role sigue siendo teacher, pero esta sesión entra como alumno.
+    const pupil = await client(2, 'b')
+    await pupil.box.next('joined'); await pupil.box.next('room'); await host.box.next('room')
+    host.box.send({ type: 'floor', peerId: pupil.id })
+    await host.box.next('room'); await pupil.box.next('room')
+    pupil.box.send({ type: 'media', source: 'screen' })
+    assert.equal((await host.box.next('room')).presentation.peerId, pupil.id)
+    await pupil.box.next('room')
+    await db.query("UPDATE app_sessions SET active_role='teacher' WHERE user_id=2")
+    pupil.box.send({ type: 'hand', raised: true })
+    assert.match((await pupil.box.next('error')).message, /perfil cambió/)
+    assert.equal((await host.box.next('room')).students.length, 0)
+    host.box.send({ type: 'leave' })
   })
 })
 
@@ -242,7 +300,7 @@ test('avisos: estado inicial, inicio, fin y matrículas se actualizan sin entrar
     assert.deepEqual((await noSubjects.box.next('classes')).classes, [])
     noSubjects.socket.close()
     const forbidden = await watch(2)
-    assert.match((await forbidden.box.next('error')).message, /alumnos/)
+    assert.match((await forbidden.box.next('error')).message, /perfil de alumno/)
     assert.equal(server.rooms.has('a'), true, 'Rechazar un observador no afecta la llamada del maestro.')
   })
   await t.test('finalizar y reiniciar produce un estado nuevo para el mismo curso', async () => {
@@ -267,4 +325,20 @@ test('avisos: estado inicial, inicio, fin y matrículas se actualizan sin entrar
     await db.query('DELETE FROM app_sessions WHERE user_id=3')
     assert.match((await otherWatcher.box.next('ended')).message, /sesión/)
   })
+})
+
+
+test('migración: conserva cuentas y permite varias por usuario después de retirar el índice único', async () => {
+  const db = new PGlite()
+  try {
+    await db.exec(schema)
+    await db.query("INSERT INTO users(id,name,email,password_hash,role) VALUES(1,'Alumno','student@test.local','unused','student')")
+    await db.query("INSERT INTO classroom_connections(user_id,google_sub,email,display_name,encrypted_tokens) VALUES(1,'google-a','a@test.local','A','encrypted')")
+    await db.exec('DROP INDEX idx_classroom_connections_user; CREATE UNIQUE INDEX idx_classroom_connections_user ON classroom_connections(user_id)')
+    await db.exec(schema)
+    await db.exec(schema)
+    await db.query("INSERT INTO classroom_connections(user_id,google_sub,email,display_name,encrypted_tokens) VALUES(1,'google-b','b@test.local','B','encrypted')")
+    assert.equal((await db.query('SELECT id FROM classroom_connections WHERE user_id=1')).rows.length, 2)
+    assert.equal((await db.query("SELECT indisunique FROM pg_index WHERE indexrelid=to_regclass('idx_classroom_connections_user')")).rows[0].indisunique, false)
+  } finally { await db.close() }
 })

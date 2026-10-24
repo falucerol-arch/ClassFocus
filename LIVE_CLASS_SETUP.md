@@ -76,10 +76,9 @@ usa las cuentas anteriores.
    El alumno puede entonces pulsar **Activar micrófono**: deben escucharlo el maestro y el
    alumno 2. No recibe su propia voz reenviada. El maestro puede seguir hablando.
 6. Maestro: pulsa **Quitar la palabra**, o el alumno pulsa **Devolver la palabra**. Su micrófono
-   se detiene. Conceder el turno a otro alumno retira el anterior.
+   y su presentación se detienen. Conceder el turno a otro alumno retira el anterior.
 7. Maestro: pulsa **Compartir pantalla** y elige una ventana. La pantalla sustituye el video
-   que ven los alumnos; el micrófono del maestro sigue funcionando. No se captura audio de
-   sistema ni de pestaña. **Dejar de compartir** o el botón del navegador devuelve la cámara.
+   que ven los alumnos; el micrófono del maestro sigue funcionando. El navegador ofrece compartir audio si la fuente y el sistema lo permiten. **Dejar de compartir** o el botón del navegador devuelve la cámara.
    Si la cámara está apagada, el alumno debe ver el marcador de cámara apagada, sin conservar
    el último fotograma de la pantalla. El audio continúa sin reiniciar la llamada.
 8. Alumno: pulsa **Salir de clase**. Maestro: debe desaparecer de la lista. Maestro:
@@ -167,8 +166,8 @@ materias matriculadas: abrirlo no entra a una llamada ni solicita cámara o micr
 
 - Una sala activa por materia, un maestro y hasta ocho alumnos. Es un límite del prototipo,
   no una garantía de rendimiento: depende del equipo y del ancho de banda del maestro.
-- Cada alumno se conecta únicamente al maestro. El maestro reenvía solo el audio del turno
-  autorizado a los otros alumnos. Las cámaras de alumnos no se distribuyen entre ellos.
+- Cada alumno se conecta únicamente al maestro. El maestro reenvía el audio y la pantalla del turno
+  autorizado a los otros alumnos. La pantalla usa un canal de video separado de la cámara. Las cámaras de alumnos no se distribuyen entre ellos.
 - La previa solo abre dispositivos cuando el usuario los prueba. Dar la palabra no activa automáticamente el micrófono.
   Revocar el turno detiene la captura. Salir, cambiar de página o finalizar libera los medios.
 - La caída o salida del maestro finaliza la sala. No hay reconexión automática: vuelve a iniciar
@@ -212,3 +211,73 @@ queda visible en el navegador y el build, así que nunca pongas secretos permane
 Referencias técnicas: [addTransceiver](https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/addTransceiver),
 [replaceTrack](https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpSender/replaceTrack),
 [getDisplayMedia](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getDisplayMedia).
+
+## Presentación del alumno y apagado de cámara
+
+El alumno tiene **Compartir pantalla** en la barra inferior. Se habilita cuando el maestro
+le concede la palabra y no está presentando el propio maestro. Dar la palabra no captura
+la pantalla automáticamente: el alumno debe pulsar el botón y elegir qué compartir.
+
+La pantalla del alumno aparece en la vista **Presentación** del maestro y de sus compañeros.
+Viaja en un canal separado de la cámara privada del alumno; el docente reenvía únicamente
+ese canal al grupo. El presentador conserva su vista local sin recibir su pantalla de vuelta.
+El audio de la fuente compartida se solicita al navegador. La cámara puede seguir activa para el
+análisis facial y el micrófono sigue sujeto al turno de palabra.
+
+**Dejar de compartir**, el botón nativo del navegador, devolver/perder la palabra, salir o
+el inicio de una presentación del maestro detienen la captura del alumno. Al terminar,
+se recupera la distribución anterior. Solo hay una presentación activa a la vez.
+
+El estado de video del alumno y del maestro se anuncia explícitamente. Apagar la cámara
+limpia el reproductor remoto en cuanto llega ese aviso, sin esperar a que WebRTC elimine
+la pista. El audio no se interrumpe y no queda visible el último fotograma de cámara.
+La entrega del aviso sigue dependiendo de la conexión de señalización.
+
+### Aplicación y prueba en Render
+
+Desplegar el mismo cambio en el **frontend** y en el **servicio de señalización**
+(`npm run signal`). Esta versión reserva cinco canales WebRTC por participante;
+las llamadas anteriores deben cerrarse y todos deben recargar antes de entrar de nuevo.
+La API, las variables del `.env` y el esquema de PostgreSQL no necesitan cambios.
+
+1. Con un maestro y dos alumnos matriculados en la misma materia, entrar a una clase.
+2. Sin turno, comprobar que el alumno no puede compartir pantalla.
+3. Concederle la palabra y compartir una ventana: maestro y segundo alumno deben verla,
+   incluso si la cámara del maestro está apagada. Los compañeros no reciben la cámara privada.
+4. Detener desde la app y desde el navegador. Repetir retirando/devolviendo el turno y
+   haciendo que el maestro comience a presentar: la captura del alumno debe detenerse.
+5. Apagar y encender la cámara de cada perfil. En el otro equipo debe aparecer **Cámara
+   apagada**, sin fotograma congelado, mientras la voz continúa. Probar también sin micrófono.
+6. Repetir desde redes diferentes. Los tests usan dobles de WebRTC y no sustituyen esta
+   comprobación con dispositivos, navegadores y conectividad reales.
+
+## Audio de la presentación
+
+Maestro y alumno solicitan audio junto con la pantalla. En el selector del navegador,
+elegir una pestaña con sonido y marcar **Compartir audio**. También se solicita audio de
+ventana, si el navegador y el sistema lo admiten: estas opciones son preferencias, no una
+garantía de que el sistema pueda capturarlo. Para probar en Ubuntu, empezar con una pestaña
+del navegador. No presentar la propia pestaña de ClassFocus, para evitar capturar la llamada.
+
+El audio de la presentación utiliza un quinto canal WebRTC y se reproduce por la salida
+elegida en la previa. Funciona aunque el micrófono esté apagado; silenciar el micrófono
+solo silencia la voz. No se reproduce la captura propia dentro de la app.
+
+El maestro escucha la pantalla del alumno autorizado y reenvía su sonido a los otros
+alumnos, sin devolvérselo al presentador. Retirar/devolver el turno o detener la presentación
+libera tanto el audio como el video. Si solo termina la pista de audio, el video continúa.
+
+La app muestra **Compartiendo pantalla con audio** cuando recibió una pista de audio viva
+(no mide si hay sonido en ese instante). Si no la recibe, muestra **Compartiendo sin audio**
+con instrucciones; la llamada continúa y nunca se solicita el micrófono como reemplazo.
+
+Aplicar este parche después del de pantalla del alumno. Este cambio de audio modifica el
+frontend; en Render requiere reconstruirlo y cerrar/reabrir las llamadas en todos los
+equipos. Mantener en señalización la versión del parche anterior. Si ambos parches todavía
+no se han desplegado, publicar también ese servidor actualizado. No hay cambios de
+variables de entorno, dependencias ni base de datos.
+
+Prueba manual: compartir un video desde una pestaña con **Compartir audio** marcado; con
+el micrófono apagado comprobar que lo escuchan los demás. Repetir como alumno con turno,
+retirar el turno mientras suena y verificar que el sonido se detiene. Probar también sin
+marcar audio: el aviso debe indicar que la presentación no incluye sonido. Usar audífonos.

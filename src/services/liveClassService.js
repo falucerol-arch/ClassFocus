@@ -1,6 +1,7 @@
 import { signalingUrl } from './signalingUrl.js'
 
-// Tres canales fijos por alumno: video, audio y audio del turno de palabra.
+// Cinco canales fijos: video docente/cámara, micrófono, voz del turno, pantalla y audio compartido.
+// La pantalla viaja separada de la cámara privada para no reenviar sus fotogramas al grupo.
 // El maestro ofrece siempre; replaceTrack evita renegociar al cambiar de cámara a pantalla.
 export class ClassPeer {
   constructor({ teacher, send, onStreams, onFailure, configuration, Peer = globalThis.RTCPeerConnection,
@@ -23,6 +24,8 @@ export class ClassPeer {
       this.pc.addTransceiver('video', { direction: 'sendrecv' })
       this.pc.addTransceiver('audio', { direction: 'sendrecv' })
       this.pc.addTransceiver('audio', { direction: 'sendonly' })
+      this.pc.addTransceiver('video', { direction: 'sendrecv' })
+      this.pc.addTransceiver('audio', { direction: 'sendrecv' })
     }
   }
   publishStreams() {
@@ -30,20 +33,21 @@ export class ClassPeer {
     const slots = this.pc.getTransceivers()
     const tracks = slots.slice(0, 2).map(t => t.receiver.track).filter(Boolean)
     const floor = !this.teacher && slots[2]?.receiver.track
-    this.onStreams(new this.Stream(tracks), floor ? new this.Stream([floor]) : null)
+    const presentation = [slots[3]?.receiver.track, slots[4]?.receiver.track].filter(Boolean)
+    this.onStreams(new this.Stream(tracks), floor ? new this.Stream([floor]) : null, presentation.length ? new this.Stream(presentation) : null)
   }
-  async tracks(video, audio, floor = null) {
+  async tracks(video, audio, floor = null, screen = null, screenAudio = null) {
     if (this.closed) return
     const slots = this.pc.getTransceivers()
-    try { await Promise.all(slots.map((slot, index) => slot.sender.replaceTrack([video, audio, floor][index] || null))) }
+    try { await Promise.all(slots.map((slot, index) => slot.sender.replaceTrack([video, audio, floor, screen, screenAudio][index] || null))) }
     catch (error) { if (!this.closed) throw error }
   }
-  async offer(video, audio, floor) {
-    await this.tracks(video, audio, floor)
+  async offer(video, audio, floor, screen, screenAudio) {
+    await this.tracks(video, audio, floor, screen, screenAudio)
     await this.pc.setLocalDescription(await this.pc.createOffer())
     this.send({ kind: 'offer', sdp: this.pc.localDescription.sdp })
   }
-  async receive(data, video, audio) {
+  async receive(data, video, audio, screen, screenAudio) {
     if (this.closed) return
     if (data.kind === 'ice') {
       if (!this.pc.remoteDescription) this.pendingIce.push(data.candidate)
@@ -56,7 +60,9 @@ export class ClassPeer {
       slots[0].direction = 'sendrecv'
       slots[1].direction = 'sendrecv'
       slots[2].direction = 'recvonly'
-      await this.tracks(video, audio)
+      slots[3].direction = 'sendrecv'
+      slots[4].direction = 'sendrecv'
+      await this.tracks(video, audio, null, screen, screenAudio)
       await this.pc.setLocalDescription(await this.pc.createAnswer())
       this.send({ kind: 'answer', sdp: this.pc.localDescription.sdp })
     }
@@ -75,6 +81,7 @@ export class LiveClass {
     this.queue = Promise.resolve()
     this.state = null
     this.generation = 0
+    this.floorGeneration = 0
     const configured = import.meta.env?.VITE_RTC_ICE_SERVERS
     this.configuration = { iceServers: configured ? JSON.parse(configured) : [{ urls: 'stun:stun.l.google.com:19302' }] }
   }
@@ -107,7 +114,7 @@ export class LiveClass {
   send(message) { if (!this.closed && this.socket?.readyState === 1) this.socket.send(JSON.stringify(message)) }
   notify() {
     if (!this.closed) this.onChange({ room: this.state, remotes: new Map(this.remote), local: this.camera,
-      microphone: !!this.mic, sharing: !!this.screen, presentation: this.screen, outputId: this.outputId || '', joined: this.joined, peerId: this.peerId })
+      microphone: !!this.mic, sharing: !!this.screen, screenAudio: !!this.screenAudioTrack(), presentation: this.screen, outputId: this.outputId || '', joined: this.joined, peerId: this.peerId })
   }
   async receive(message) {
     if (message.type === 'error' || message.type === 'ended') { this.fail(message.message); return }
@@ -118,15 +125,25 @@ export class LiveClass {
     if (message.type === 'joined') this.joined = true
     if (message.type === 'room') {
       const previousFloor = this.state?.floorId
+      const previousVideo = this.state?.students.find(s => s.peerId === this.peerId)?.video
+      // Limpiar videos apagados antes de esperar cambios de pistas o nuevas ofertas.
       this.state = message
+      this.notify()
+      if (previousFloor !== message.floorId) this.floorGeneration++
+      const myVideo = message.students.find(s => s.peerId === this.peerId)?.video
+      if (this.role === 'student' && this.screen && (message.floorId !== this.peerId ||
+        message.teacherVideo?.source === 'screen' || (previousVideo?.source === 'screen' && myVideo?.source !== 'screen'))) {
+        await this.shareScreen(false)
+      }
       if (this.role === 'student' && message.floorId !== this.peerId && this.mic) await this.microphone(false)
       const expected = this.role === 'teacher' ? message.students.map(s => s.peerId) : [message.teacher.peerId]
       for (const [id, peer] of this.peers) if (!expected.includes(id)) { peer.close(); this.peers.delete(id); this.remote.delete(id) }
       if (this.role === 'teacher') for (const id of expected) if (!this.peers.has(id)) {
         const peer = this.makePeer(id)
-        await peer.offer(this.videoTrack(), this.mic, this.floorTrack(id))
+        await peer.offer(this.videoTrack(), this.mic, this.floorTrack(id), this.outboundScreen(id), this.outboundScreenAudio(id))
       }
-      if (previousFloor !== message.floorId) await this.updateTracks()
+      // El reenvío cambia también cuando termina una pantalla, aunque no cambie el turno.
+      await this.updateTracks()
       this.publishVideoState()
       this.notify()
     }
@@ -136,7 +153,7 @@ export class LiveClass {
         if (this.role !== 'student' || message.from !== this.state?.teacher.peerId || !['offer', 'ice'].includes(message.data.kind)) throw new Error('Señal inesperada en la clase.')
         peer = this.makePeer(message.from)
       }
-      await peer.receive(message.data, this.videoTrack(), this.mic)
+      await peer.receive(message.data, this.videoTrack(), this.mic, this.outboundScreen(message.from), this.outboundScreenAudio(message.from))
     }
   }
   makePeer(id) {
@@ -147,32 +164,54 @@ export class LiveClass {
         if (this.role === 'teacher') this.onError('Un alumno no pudo conectar su audio/video. Pídele que salga y vuelva a entrar.')
         else this.fail(text)
       },
-      onStreams: (stream, floor) => {
+      onStreams: (stream, floor, presentation) => {
         if (this.closed) return
-        this.remote.set(id, { stream, floor })
-        // Solo el audio autorizado se reproduce y se reenvía a los demás alumnos.
+        this.remote.set(id, { stream, floor, presentation })
+        // Se reenvían únicamente el audio y la pantalla del turno autorizado.
         this.updateTracks().catch(error => this.fail(error.message))
         this.notify()
       } })
     this.peers.set(id, peer)
     return peer
   }
-  videoTrack() { return (this.screen || this.camera)?.getVideoTracks()[0] || null }
+  videoTrack() { return (this.role === 'teacher' ? this.screen || this.camera : this.camera)?.getVideoTracks()[0] || null }
   floorTrack(target) {
     const id = this.state?.floorId
     return this.role === 'teacher' && id && id !== target ? this.remote.get(id)?.stream.getAudioTracks()[0] || null : null
   }
+  outboundScreen(target) {
+    if (this.role === 'student') return this.screen?.getVideoTracks()[0] || null
+    if (this.screen) return null
+    const presenter = this.state?.students.find(student => student.peerId === this.state.floorId)
+    // Nunca se reenvían cámaras privadas: únicamente la pantalla del alumno autorizado.
+    if (presenter?.video?.source === 'screen' && presenter.peerId !== target) {
+      return this.remote.get(presenter.peerId)?.presentation?.getVideoTracks()[0] || null
+    }
+    return null
+  }
+  // El audio de la fuente compartida no depende del botón del micrófono.
+  screenAudioTrack() { return this.screen?.getAudioTracks().find(track => track.readyState !== 'ended') || null }
+  outboundScreenAudio(target) {
+    if (this.screen) return this.screenAudioTrack()
+    if (this.role !== 'teacher') return null
+    const presenter = this.state?.students.find(student => student.peerId === this.state.floorId)
+    // Igual que el video: solo el turno que está presentando, sin devolvérselo a su autor.
+    if (presenter?.video?.source === 'screen' && presenter.peerId !== target) {
+      return this.remote.get(presenter.peerId)?.presentation?.getAudioTracks().find(track => track.readyState !== 'ended') || null
+    }
+    return null
+  }
   publishVideoState() {
-    if (this.role !== 'teacher' || !this.joined || this.closed) return
+    if (!this.joined || this.closed) return
     const source = this.screen ? 'screen' : this.camera ? 'camera' : 'off'
-    const key = `${source}:${this.videoTrack()?.id || ''}`
+    const key = `${source}:${(this.screen || this.camera)?.getVideoTracks()[0]?.id || ''}`
     if (key === this.lastVideoKey) return
     this.lastVideoKey = key
     // replaceTrack no informa por sí solo a la interfaz remota que la presentación terminó.
     this.send({ type: 'media', source })
   }
   async updateTracks() {
-    await Promise.all([...this.peers].map(([id, peer]) => peer.tracks(this.videoTrack(), this.mic, this.floorTrack(id))))
+    await Promise.all([...this.peers].map(([id, peer]) => peer.tracks(this.videoTrack(), this.mic, this.floorTrack(id), this.outboundScreen(id), this.outboundScreenAudio(id))))
   }
   async capture(constraints, display = false) {
     if (this.closed || !this.joined) throw new Error('Entra a la clase antes de activar tus dispositivos.')
@@ -189,7 +228,8 @@ export class LiveClass {
       this.camera = await this.capture({ video: { width: { ideal: 640 }, height: { ideal: 360 }, ...(this.cameraId ? { deviceId: { exact: this.cameraId } } : {}) }, audio: false })
       if (this.camera) this.camera.getVideoTracks()[0].onended = () => { this.cameraEnabled(false).catch(e => this.fail(e.message)) }
     } else if (!enabled) { this.release(this.camera); this.camera = null }
-    await this.updateTracks(); this.publishVideoState(); this.notify()
+    // El estado explícito limpia el último fotograma sin esperar a replaceTrack/ICE.
+    this.publishVideoState(); this.notify(); await this.updateTracks()
   }
   async microphone(enabled) {
     if (enabled && this.role === 'student' && this.state?.floorId !== this.peerId) throw new Error('Pide la palabra y espera la autorización del maestro.')
@@ -203,15 +243,33 @@ export class LiveClass {
         this.mic.onended = () => { this.microphone(false).catch(e => this.fail(e.message)) }
       }
     } else if (!enabled) { this.release(this.micStream); this.micStream = null; this.mic = null }
-    await this.updateTracks(); this.publishVideoState(); this.notify()
+    this.publishVideoState(); this.notify(); await this.updateTracks()
   }
   async shareScreen(enabled) {
-    if (this.role !== 'teacher') throw new Error('Solo el maestro puede compartir pantalla.')
+    if (enabled && this.role === 'student' && this.state?.floorId !== this.peerId) {
+      throw new Error('Pide la palabra y espera la autorización del maestro para presentar.')
+    }
+    if (enabled && this.role === 'student' && this.state?.teacherVideo?.source === 'screen') {
+      throw new Error('El maestro está presentando. Espera a que termine para compartir tu pantalla.')
+    }
     if (enabled && !this.screen) {
-      this.screen = await this.capture({ video: true, audio: false }, true)
-      if (this.screen) this.screen.getVideoTracks()[0].onended = () => { this.shareScreen(false).catch(e => this.fail(e.message)) }
+      const floorGeneration = this.floorGeneration
+      const stream = await this.capture({ video: { displaySurface: 'browser' }, audio: true,
+        selfBrowserSurface: 'exclude', systemAudio: 'include', windowAudio: 'window' }, true)
+      // La autorización puede cambiar mientras el usuario elige qué ventana compartir.
+      if (stream && this.role === 'student' && (this.state?.floorId !== this.peerId ||
+        floorGeneration !== this.floorGeneration || this.state?.teacherVideo?.source === 'screen')) this.release(stream)
+      else this.screen = stream
+      if (this.screen) {
+        this.screen.getVideoTracks()[0].onended = () => { this.shareScreen(false).catch(e => this.fail(e.message)) }
+        // El navegador puede terminar solo el audio; la presentación continúa sin sonido.
+        for (const track of this.screen.getAudioTracks()) track.onended = () => {
+          this.notify(); this.updateTracks().catch(e => this.fail(e.message))
+        }
+      }
     } else if (!enabled) { this.release(this.screen); this.screen = null }
-    await this.updateTracks(); this.publishVideoState(); this.notify()
+    // El estado explícito limpia el último fotograma sin esperar a replaceTrack/ICE.
+    this.publishVideoState(); this.notify(); await this.updateTracks()
   }
   hand(raised) { this.send({ type: 'hand', raised }) }
   floor(peerId) { this.send({ type: 'floor', peerId }) }
