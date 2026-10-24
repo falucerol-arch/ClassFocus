@@ -1,4 +1,4 @@
-import 'dotenv/config'
+\import 'dotenv/config'
 import 'express-async-errors'
 import express from 'express'
 import cors from 'cors'
@@ -99,13 +99,7 @@ export function createApp({
       id: row.id,
       name: row.name,
       email: row.email,
-
-      // role representa el perfil ACTIVO
-      // cuando viene de una sesión.
       role: row.role,
-
-      // roles contiene todos los perfiles
-      // disponibles para esa persona.
       roles,
 
       source:
@@ -237,12 +231,6 @@ export function createApp({
         role
       } = req.body || {}
 
-      // ---------------------------------------------
-      // Buscar únicamente por correo.
-      //
-      // La identidad ya NO depende del rol.
-      // ---------------------------------------------
-
       const result =
         await db.query(
           `
@@ -311,11 +299,6 @@ export function createApp({
           ? user.roles
           : [user.role]
 
-      // ---------------------------------------------
-      // Si el frontend todavía envía role,
-      // utilizamos ese perfil.
-      // ---------------------------------------------
-
       let selectedRole =
         role
           ? String(role)
@@ -338,20 +321,12 @@ export function createApp({
             })
         }
       } else {
-        // -------------------------------------------
-        // Si tiene un solo rol, entrar directamente.
-        // -------------------------------------------
-
         if (
           userRoles.length === 1
         ) {
           selectedRole =
             userRoles[0]
         } else {
-          // -----------------------------------------
-          // Futuro selector de perfiles.
-          // -----------------------------------------
-
           return res
             .status(409)
             .json({
@@ -420,8 +395,6 @@ export function createApp({
     })
   )
 
-  // Desde aquí todas las rutas
-  // requieren sesión.
   app.use(
     '/api',
     auth.requireUser
@@ -638,10 +611,6 @@ export function createApp({
         samplesResult
       ] =
         await Promise.all([
-          // -------------------------------------------
-          // Usuarios con todos sus roles.
-          // -------------------------------------------
-
           db.query(
             `
             SELECT
@@ -741,10 +710,6 @@ export function createApp({
       const user =
         req.user
 
-      // =====================================================
-      // MATERIAS VISIBLES
-      // =====================================================
-
       const allowedSubjects =
         new Set(
           subjectsResult.rows
@@ -786,10 +751,6 @@ export function createApp({
             )
         )
 
-      // =====================================================
-      // MATRÍCULAS VISIBLES
-      // =====================================================
-
       const enrollments =
         enrollmentsResult.rows
           .filter(
@@ -806,10 +767,6 @@ export function createApp({
                   user.id
               )
           )
-
-      // =====================================================
-      // USUARIOS VISIBLES
-      // =====================================================
 
       const visibleUsers =
         new Set([
@@ -847,10 +804,6 @@ export function createApp({
           }
         )
 
-      // =====================================================
-      // MÉTRICAS
-      // =====================================================
-
       const ownMetric =
         row =>
           user.role ===
@@ -869,10 +822,6 @@ export function createApp({
                 user.id
             )
           )
-
-      // =====================================================
-      // AGRUPAR ASIGNACIONES
-      // =====================================================
 
       const grouped =
         new Map()
@@ -1076,10 +1025,6 @@ export function createApp({
 
       await transaction(
         async client => {
-          // =================================================
-          // BLOQUEO
-          // =================================================
-
           await client.query(
             `
             SELECT
@@ -1090,10 +1035,6 @@ export function createApp({
               )
             `
           )
-
-          // =================================================
-          // MATERIAS IMPORTADAS
-          // =================================================
 
           const imported =
             await client.query(
@@ -1111,10 +1052,6 @@ export function createApp({
                   row.id
               )
             )
-
-          // =================================================
-          // USUARIOS EXISTENTES
-          // =================================================
 
           const existing =
             await client.query(
@@ -1167,13 +1104,8 @@ export function createApp({
               10
             )
 
-          // incoming ID -> ID real
           const resolvedUserIds =
             new Map()
-
-          // =================================================
-          // CREAR / ACTUALIZAR USUARIOS
-          // =================================================
 
           for (
             const incomingUser
@@ -1215,20 +1147,10 @@ export function createApp({
               ) &&
               incomingId > 0
 
-            // ---------------------------------------------
-            // Si el correo ya existe:
-            // reutilizamos la misma PERSONA.
-            // ---------------------------------------------
-
             const sameEmailUser =
               existingByEmail.get(
                 emailKey
               )
-
-            // ---------------------------------------------
-            // Los usuarios importados por Classroom
-            // conservan su identidad.
-            // ---------------------------------------------
 
             if (
               sameEmailUser?.source ===
@@ -1264,7 +1186,6 @@ export function createApp({
                 primaryRole
               )
             ) {
-              // Prioridad para compatibilidad.
               if (
                 roles.includes(
                   'admin'
@@ -1302,10 +1223,6 @@ export function createApp({
                     actualId
                   )
                 : null
-
-            // ---------------------------------------------
-            // Crear/actualizar usando ID existente.
-            // ---------------------------------------------
 
             if (actualId) {
               const passwordHash =
@@ -1366,10 +1283,6 @@ export function createApp({
                 ]
               )
             } else {
-              // -------------------------------------------
-              // Permite crear un usuario sin ID manual.
-              // -------------------------------------------
-
               const created =
                 await client.query(
                   `
@@ -1416,10 +1329,6 @@ export function createApp({
                 actualId
               )
             }
-
-            // ---------------------------------------------
-            // Actualizar roles.
-            // ---------------------------------------------
 
             await client.query(
               `
@@ -1497,10 +1406,6 @@ export function createApp({
             )
           }
 
-          // =================================================
-          // AJUSTAR SECUENCIA
-          // =================================================
-
           await client.query(
             `
             SELECT setval(
@@ -1527,10 +1432,6 @@ export function createApp({
             )
             `
           )
-
-          // =================================================
-          // MATERIAS
-          // =================================================
 
           const incomingSubjectIds =
             subjects
@@ -1595,22 +1496,36 @@ export function createApp({
               continue
             }
 
+            // =================================================
+            // CORRECCIÓN:
+            // sin maestro = NULL, nunca ID 0
+            // =================================================
+
+            const rawTeacherId =
+              subject.defaultTeacherId
+
             const incomingTeacherId =
-              Number(
-                subject.defaultTeacherId
-              )
+              rawTeacherId === null ||
+              rawTeacherId === undefined ||
+              rawTeacherId === ''
+                ? null
+                : Number(
+                    rawTeacherId
+                  )
 
             const resolvedTeacherId =
-              resolvedUserIds.get(
+              incomingTeacherId &&
+              Number.isInteger(
                 incomingTeacherId
-              ) ||
-              (
-                Number.isInteger(
-                  incomingTeacherId
-                )
-                  ? incomingTeacherId
-                  : null
-              )
+              ) &&
+              incomingTeacherId > 0
+                ? (
+                    resolvedUserIds.get(
+                      incomingTeacherId
+                    ) ||
+                    incomingTeacherId
+                  )
+                : null
 
             await client.query(
               `
@@ -1704,10 +1619,6 @@ export function createApp({
               ]
             )
           }
-
-          // =================================================
-          // MATRÍCULAS
-          // =================================================
 
           await client.query(
             `
@@ -2543,52 +2454,69 @@ export function createApp({
     }
   )
 
-// =========================================================
-// ERRORES
-// =========================================================
+  // =========================================================
+  // ERRORES
+  // =========================================================
 
+  app.use(
+    (
+      error,
+      _req,
+      res,
+      _next
+    ) => {
+      const status =
+        error instanceof HttpError
+          ? error.status
+          : 500
 
-app.use(
-  (
-    error,
-    _req,
-    res,
-    _next
-  ) => {
-    const status =
-      error instanceof HttpError
-        ? error.status
-        : 500
+      if (
+        status === 500
+      ) {
+        console.error(
+          '[ClassFocus API] Error interno:',
+          {
+            code:
+              error.code,
 
-    if (status === 500) {
-      console.error(
-        '[ClassFocus API] Error interno:',
-        {
-          code: error.code,
-          message: error.message,
-          detail: error.detail,
-          constraint: error.constraint,
-          table: error.table,
-          schema: error.schema,
-          column: error.column,
-          routine: error.routine
-        }
-      )
+            message:
+              error.message,
+
+            detail:
+              error.detail,
+
+            constraint:
+              error.constraint,
+
+            table:
+              error.table,
+
+            schema:
+              error.schema,
+
+            column:
+              error.column,
+
+            routine:
+              error.routine
+          }
+        )
+      }
+
+      res
+        .status(status)
+        .json({
+          message:
+            status === 500
+              ? 'Error interno de ClassFocus API.'
+              : error.message
+        })
     }
+  )
 
-    res
-      .status(status)
-      .json({
-        message:
-          status === 500
-            ? 'Error interno de ClassFocus API.'
-            : error.message
-      })
-  }
-)
-
-return app
+  return app
 }
+
 // =========================================================
 // INICIO DEL SERVIDOR
 // =========================================================
