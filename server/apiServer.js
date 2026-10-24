@@ -2543,49 +2543,65 @@ export function createApp({
     }
   )
 
-  // =========================================================
-  // ERRORES
-  // =========================================================
+// =========================================================
+// ERRORES
+// =========================================================
 
-  app.use(
-    (
-      error,
-      _req,
-      res,
-      _next
-    ) => {
-      const status =
-        error instanceof
-          HttpError
+app.use(
+  (
+    error,
+    _req,
+    res,
+    _next
+  ) => {
+    const status =
+      error instanceof HttpError
+        ? error.status
+        : 500
 
-          ? error.status
-          : 500
+    if (status === 500) {
+      console.error(
+        '[ClassFocus API] Error interno:',
+        {
+          code:
+            error.code,
 
-      if (
-        status === 500
-      ) {
-        console.error(
-          '[ClassFocus API] Falló una operación interna; código:',
-          error.code ||
-          error.name
-        )
-      }
-
-      res
-        .status(status)
-        .json({
           message:
-            status === 500
+            error.message,
 
-              ? 'Error interno de ClassFocus API.'
+          detail:
+            error.detail,
 
-              : error.message
-        })
+          constraint:
+            error.constraint,
+
+          table:
+            error.table,
+
+          schema:
+            error.schema,
+
+          column:
+            error.column,
+
+          routine:
+            error.routine
+        }
+      )
     }
-  )
 
-  return app
-}
+    res
+      .status(status)
+      .json({
+        message:
+          status === 500
+            ? 'Error interno de ClassFocus API.'
+            : error.message
+      })
+  }
+)
+
+return app
 
 // =========================================================
 // INICIO DEL SERVIDOR
