@@ -1,286 +1,208 @@
 import { signalingUrl } from './signalingUrl.js'
 
-const DEFAULT_ICE_SERVERS = [
-  {
-    urls: [
-      'stun:stun.l.google.com:19302',
-      'stun:stun1.l.google.com:19302',
-      'stun:stun2.l.google.com:19302'
-    ]
-  },
-  {
-    urls: 'stun:stun.cloudflare.com:3478'
-  }
-]
-
-function getRtcConfiguration() {
-  const configured =
-    import.meta.env?.VITE_RTC_ICE_SERVERS
-
-  if (!configured) {
-    return {
-      iceServers:
-        DEFAULT_ICE_SERVERS,
-
-      iceCandidatePoolSize:
-        10
-    }
-  }
-
-  try {
-    const parsed =
-      JSON.parse(configured)
-
-    if (
-      !Array.isArray(parsed) ||
-      !parsed.length
-    ) {
-      throw new Error(
-        'VITE_RTC_ICE_SERVERS debe ser un arreglo JSON.'
-      )
-    }
-
-    return {
-      iceServers:
-        parsed,
-
-      iceCandidatePoolSize:
-        10
-    }
-
-  } catch (error) {
-
-    console.warn(
-      '[ClassFocus RTC] VITE_RTC_ICE_SERVERS no es válido. Se usarán servidores STUN por defecto.',
-      error
-    )
-
-    return {
-      iceServers:
-        DEFAULT_ICE_SERVERS,
-
-      iceCandidatePoolSize:
-        10
-    }
-  }
-}
-
-
-// =====================================================
-// CONEXIÓN ENTRE MAESTRO Y ALUMNO
-// =====================================================
+// Cinco canales fijos:
+// 0 = video/cámara
+// 1 = micrófono
+// 2 = voz del turno
+// 3 = pantalla
+// 4 = audio compartido
+//
+// La pantalla viaja separada de la cámara privada.
+// El maestro crea siempre la oferta.
 
 export class ClassPeer {
-
   constructor({
     teacher,
     send,
     onStreams,
     onFailure,
     configuration,
-    Peer =
-      globalThis.RTCPeerConnection,
-    Stream =
-      globalThis.MediaStream
+    Peer = globalThis.RTCPeerConnection,
+    Stream = globalThis.MediaStream
   }) {
+    this.teacher = teacher
+    this.send = send
+    this.onStreams = onStreams
+    this.onFailure = onFailure
+    this.Stream = Stream
 
-    this.teacher =
-      teacher
+    this.pc = new Peer(configuration)
 
-    this.send =
-      send
+    this.pendingIce = []
+    this.closed = false
 
-    this.onStreams =
-      onStreams
-
-    this.Stream =
-      Stream
-
-    this.pc =
-      new Peer(configuration)
-
-    this.pendingIce =
-      []
-
-
-    // ===============================================
+    // =====================================================
     // ICE
-    // ===============================================
+    // =====================================================
 
-    this.pc.onicecandidate =
-      ({ candidate }) => {
+    this.pc.onicecandidate = ({ candidate }) => {
+      if (!candidate || this.closed) return
 
-        if (candidate) {
-          send({
-            kind: 'ice',
+      send({
+        kind: 'ice',
+        candidate: candidate.toJSON()
+      })
+    }
 
-            candidate:
-              candidate.toJSON()
-          })
-        }
-      }
+    // =====================================================
+    // TRACKS REMOTOS
+    // =====================================================
 
+    this.pc.ontrack = () => {
+      // ontrack puede ejecutarse mientras
+      // setRemoteDescription aún está terminando.
+      queueMicrotask(() => {
+        this.publishStreams()
+      })
+    }
 
-    // ===============================================
-    // PISTAS REMOTAS
-    // ===============================================
-
-    this.pc.ontrack =
-      () => {
-
-        queueMicrotask(
-          () =>
-            this.publishStreams()
-        )
-      }
-
-
-    // ===============================================
+    // =====================================================
     // ESTADO DE CONEXIÓN
-    // ===============================================
+    // =====================================================
 
-    this.pc.onconnectionstatechange =
-      () => {
+    this.pc.onconnectionstatechange = () => {
+      if (this.closed) return
 
-        const state =
-          this.pc.connectionState
+      const state =
+        this.pc.connectionState
 
+      console.log(
+        '[ClassFocus WebRTC] Estado:',
+        state
+      )
+
+      if (state === 'connected') {
         console.log(
-          '[ClassFocus WebRTC]',
-          state
+          '✅ ClassFocus WebRTC conectado'
+        )
+      }
+
+      if (state === 'disconnected') {
+        console.warn(
+          '⚠️ ClassFocus WebRTC desconectado temporalmente'
+        )
+      }
+
+      if (state === 'failed') {
+        console.warn(
+          '⚠️ Falló ICE/WebRTC. Intentando recuperar conexión...'
         )
 
-        if (
-          state === 'failed'
-        ) {
-          onFailure(
-            'No se pudo conectar el audio/video. Sal y vuelve a entrar a la clase.'
+        try {
+          this.pc.restartIce()
+        } catch (error) {
+          console.warn(
+            '[ClassFocus WebRTC] No se pudo ejecutar restartIce:',
+            error
           )
         }
+
+        // IMPORTANTE:
+        // No cerramos toda la clase.
+        onFailure(
+          'La conexión de audio/video está inestable. Intentando reconectar...'
+        )
       }
+    }
 
+    // =====================================================
+    // ESTADO ICE
+    // =====================================================
 
-    // ===============================================
-    // EL MAESTRO CREA LOS CANALES
-    // ===============================================
+    this.pc.oniceconnectionstatechange = () => {
+      if (this.closed) return
+
+      console.log(
+        '[ClassFocus ICE] Estado:',
+        this.pc.iceConnectionState
+      )
+    }
+
+    // =====================================================
+    // MAESTRO CREA LOS 5 TRANSCEIVERS
+    // =====================================================
 
     if (teacher) {
-
-      // Cámara
       this.pc.addTransceiver(
         'video',
         {
-          direction:
-            'sendrecv'
+          direction: 'sendrecv'
         }
       )
 
-      // Micrófono
       this.pc.addTransceiver(
         'audio',
         {
-          direction:
-            'sendrecv'
+          direction: 'sendrecv'
         }
       )
 
-      // Voz del turno
       this.pc.addTransceiver(
         'audio',
         {
-          direction:
-            'sendonly'
+          direction: 'sendonly'
         }
       )
 
-      // Pantalla
       this.pc.addTransceiver(
         'video',
         {
-          direction:
-            'sendrecv'
+          direction: 'sendrecv'
         }
       )
 
-      // Audio pantalla
       this.pc.addTransceiver(
         'audio',
         {
-          direction:
-            'sendrecv'
+          direction: 'sendrecv'
         }
       )
     }
   }
 
-
-  // ===================================================
+  // =====================================================
   // PUBLICAR STREAMS
-  // ===================================================
+  // =====================================================
 
   publishStreams() {
-
-    if (this.closed) {
-      return
-    }
+    if (this.closed) return
 
     const slots =
       this.pc.getTransceivers()
 
-
-    // Cámara + audio principal
     const tracks =
       slots
         .slice(0, 2)
         .map(
           transceiver =>
-            transceiver
-              .receiver
-              .track
+            transceiver.receiver.track
         )
         .filter(
           track =>
             track &&
-            track.readyState !==
-              'ended'
+            track.readyState !== 'ended'
         )
 
-
-    // Audio del turno
     const floorTrack =
       !this.teacher
-        ? slots[2]
-            ?.receiver
-            ?.track
+        ? slots[2]?.receiver?.track
         : null
-
 
     const floor =
       floorTrack &&
-      floorTrack.readyState !==
-        'ended'
+      floorTrack.readyState !== 'ended'
         ? floorTrack
         : null
 
-
-    // Pantalla
     const presentation =
       [
-        slots[3]
-          ?.receiver
-          ?.track,
-
-        slots[4]
-          ?.receiver
-          ?.track
-      ]
-        .filter(
-          track =>
-            track &&
-            track.readyState !==
-              'ended'
-        )
-
+        slots[3]?.receiver?.track,
+        slots[4]?.receiver?.track
+      ].filter(
+        track =>
+          track &&
+          track.readyState !== 'ended'
+      )
 
     this.onStreams(
       new this.Stream(
@@ -301,10 +223,9 @@ export class ClassPeer {
     )
   }
 
-
-  // ===================================================
-  // CAMBIAR PISTAS
-  // ===================================================
+  // =====================================================
+  // REEMPLAZAR TRACKS
+  // =====================================================
 
   async tracks(
     video,
@@ -313,10 +234,7 @@ export class ClassPeer {
     screen = null,
     screenAudio = null
   ) {
-
-    if (this.closed) {
-      return
-    }
+    if (this.closed) return
 
     const slots =
       this.pc.getTransceivers()
@@ -330,29 +248,24 @@ export class ClassPeer {
     ]
 
     try {
-
       await Promise.all(
         slots.map(
           (slot, index) =>
             slot.sender.replaceTrack(
-              tracks[index] ||
-              null
+              tracks[index] || null
             )
         )
       )
-
     } catch (error) {
-
       if (!this.closed) {
         throw error
       }
     }
   }
 
-
-  // ===================================================
-  // CREAR OFFER
-  // ===================================================
+  // =====================================================
+  // OFFER DEL MAESTRO
+  // =====================================================
 
   async offer(
     video,
@@ -361,6 +274,7 @@ export class ClassPeer {
     screen,
     screenAudio
   ) {
+    if (this.closed) return
 
     await this.tracks(
       video,
@@ -373,26 +287,20 @@ export class ClassPeer {
     const offer =
       await this.pc.createOffer()
 
-    await this.pc
-      .setLocalDescription(
-        offer
-      )
+    await this.pc.setLocalDescription(
+      offer
+    )
 
     this.send({
-      kind:
-        'offer',
-
+      kind: 'offer',
       sdp:
-        this.pc
-          .localDescription
-          .sdp
+        this.pc.localDescription.sdp
     })
   }
 
-
-  // ===================================================
-  // RECIBIR SEÑAL
-  // ===================================================
+  // =====================================================
+  // RECIBIR OFFER / ANSWER / ICE
+  // =====================================================
 
   async receive(
     data,
@@ -401,66 +309,53 @@ export class ClassPeer {
     screen,
     screenAudio
   ) {
+    if (this.closed) return
 
-    if (this.closed) {
-      return
-    }
-
-
-    // ===============================================
+    // ===================================================
     // ICE
-    // ===============================================
+    // ===================================================
 
     if (
-      data.kind ===
-      'ice'
+      data.kind === 'ice'
     ) {
-
       if (
-        !this.pc
-          .remoteDescription
+        !this.pc.remoteDescription
       ) {
-
         this.pendingIce.push(
           data.candidate
         )
-
       } else {
-
-        await this.pc
-          .addIceCandidate(
+        try {
+          await this.pc.addIceCandidate(
             data.candidate
           )
+        } catch (error) {
+          console.warn(
+            '[ClassFocus ICE] No se pudo agregar candidato:',
+            error
+          )
+        }
       }
 
       return
     }
 
-
-    // ===============================================
+    // ===================================================
     // OFFER / ANSWER
-    // ===============================================
+    // ===================================================
 
-    await this.pc
-      .setRemoteDescription({
-        type:
-          data.kind,
+    await this.pc.setRemoteDescription({
+      type: data.kind,
+      sdp: data.sdp
+    })
 
-        sdp:
-          data.sdp
-      })
-
-
-    // ===============================================
-    // EL ALUMNO RESPONDE
-    // ===============================================
+    // ===================================================
+    // EL ALUMNO RESPONDE AL OFFER
+    // ===================================================
 
     if (!this.teacher) {
-
       const slots =
-        this.pc
-          .getTransceivers()
-
+        this.pc.getTransceivers()
 
       if (slots[0]) {
         slots[0].direction =
@@ -487,10 +382,8 @@ export class ClassPeer {
           'sendrecv'
       }
 
-
-      // MUY IMPORTANTE:
-      // aquí se agrega la cámara
-      // antes de crear el answer.
+      // Agregar cámara/audio ANTES
+      // de crear el answer.
       await this.tracks(
         video,
         audio,
@@ -499,69 +392,67 @@ export class ClassPeer {
         screenAudio
       )
 
-
       const answer =
-        await this.pc
-          .createAnswer()
+        await this.pc.createAnswer()
 
-
-      await this.pc
-        .setLocalDescription(
-          answer
-        )
-
+      await this.pc.setLocalDescription(
+        answer
+      )
 
       this.send({
-        kind:
-          'answer',
-
+        kind: 'answer',
         sdp:
-          this.pc
-            .localDescription
-            .sdp
+          this.pc.localDescription.sdp
       })
     }
 
-
-    // ===============================================
+    // ===================================================
     // ICE PENDIENTE
-    // ===============================================
+    // ===================================================
 
     for (
       const candidate
       of this.pendingIce.splice(0)
     ) {
-
-      await this.pc
-        .addIceCandidate(
+      try {
+        await this.pc.addIceCandidate(
           candidate
         )
+      } catch (error) {
+        console.warn(
+          '[ClassFocus ICE] Candidato pendiente rechazado:',
+          error
+        )
+      }
     }
-
 
     this.publishStreams()
   }
 
+  // =====================================================
+  // CERRAR PEER
+  // =====================================================
 
   close() {
+    if (this.closed) return
 
-    this.closed =
-      true
+    this.closed = true
 
-    this.pc.close()
+    try {
+      this.pc.close()
+    } catch {
+      // Ignorar cierre duplicado.
+    }
 
-    this.pendingIce =
-      []
+    this.pendingIce = []
   }
 }
 
-
-// =====================================================
+// =========================================================
 // CLASE EN VIVO
-// =====================================================
+// =========================================================
 
 export class LiveClass {
-
   constructor({
     subjectId,
     role,
@@ -570,7 +461,6 @@ export class LiveClass {
     onError,
     onClose
   }) {
-
     Object.assign(
       this,
       {
@@ -582,7 +472,6 @@ export class LiveClass {
         onClose
       }
     )
-
 
     this.peers =
       new Map()
@@ -605,15 +494,64 @@ export class LiveClass {
     this.floorGeneration =
       0
 
+    this.closed =
+      false
 
-    this.configuration =
-      getRtcConfiguration()
+    this.joined =
+      false
+
+    // =====================================================
+    // ICE SERVERS
+    // =====================================================
+
+    const configured =
+      import.meta.env
+        ?.VITE_RTC_ICE_SERVERS
+
+    if (configured) {
+      try {
+        this.configuration = {
+          iceServers:
+            JSON.parse(configured)
+        }
+      } catch (error) {
+        console.warn(
+          '[ClassFocus] VITE_RTC_ICE_SERVERS inválido:',
+          error
+        )
+
+        this.configuration = {
+          iceServers: [
+            {
+              urls:
+                'stun:stun.l.google.com:19302'
+            },
+            {
+              urls:
+                'stun:stun1.l.google.com:19302'
+            }
+          ]
+        }
+      }
+    } else {
+      this.configuration = {
+        iceServers: [
+          {
+            urls:
+              'stun:stun.l.google.com:19302'
+          },
+          {
+            urls:
+              'stun:stun1.l.google.com:19302'
+          }
+        ]
+      }
+    }
   }
 
-
-  // ===================================================
-  // ADOPTAR MEDIA DE LA VISTA PREVIA
-  // ===================================================
+  // =====================================================
+  // MEDIA DE LA VISTA PREVIA
+  // =====================================================
 
   adoptMedia({
     camera = null,
@@ -622,7 +560,6 @@ export class LiveClass {
     microphoneId = '',
     outputId = ''
   } = {}) {
-
     if (
       this.closed ||
       this.socket ||
@@ -633,7 +570,6 @@ export class LiveClass {
       )
     }
 
-
     this.cameraId =
       cameraId
 
@@ -643,13 +579,10 @@ export class LiveClass {
     this.outputId =
       outputId
 
-
     this.camera =
       camera
 
-
     if (camera) {
-
       this.media.add(
         camera
       )
@@ -658,17 +591,15 @@ export class LiveClass {
         .getVideoTracks()
         .forEach(
           track => {
-
             track.onended =
               () => {
-
                 this
                   .cameraEnabled(
                     false
                   )
                   .catch(
                     error =>
-                      this.fail(
+                      this.onError?.(
                         error.message
                       )
                   )
@@ -677,14 +608,11 @@ export class LiveClass {
         )
     }
 
-
-    // El maestro conserva micrófono.
+    // Maestro puede entrar con micrófono.
     if (
       microphone &&
-      this.role ===
-        'teacher'
+      this.role === 'teacher'
     ) {
-
       this.media.add(
         microphone
       )
@@ -696,29 +624,24 @@ export class LiveClass {
         microphone
           .getAudioTracks()[0]
 
-
       if (this.mic) {
-
         this.mic.onended =
           () => {
-
             this
               .microphone(
                 false
               )
               .catch(
                 error =>
-                  this.fail(
+                  this.onError?.(
                     error.message
                   )
               )
           }
       }
-
     } else if (
       microphone
     ) {
-
       microphone
         .getTracks()
         .forEach(
@@ -728,18 +651,15 @@ export class LiveClass {
     }
   }
 
-
-  // ===================================================
-  // CONECTAR SIGNALING
-  // ===================================================
+  // =====================================================
+  // CONECTAR AL SIGNALING
+  // =====================================================
 
   async connect() {
-
     if (
       !navigator
         .mediaDevices
         ?.getUserMedia ||
-
       !globalThis
         .RTCPeerConnection
     ) {
@@ -748,40 +668,38 @@ export class LiveClass {
       )
     }
 
-
     const url =
       signalingUrl()
 
+    console.log(
+      '[ClassFocus Signal] Conectando:',
+      url
+    )
 
     this.socket =
       new WebSocket(url)
 
-
     this.socket.onopen =
       () => {
+        console.log(
+          '✅ ClassFocus Signal conectado'
+        )
 
         this.send({
-          type:
-            'authenticate',
-
-          token:
-            this.token
+          type: 'authenticate',
+          token: this.token
         })
       }
 
-
     this.socket.onmessage =
       ({ data }) => {
-
         this.queue =
           this.queue
             .then(
               async () => {
-
                 if (
                   !this.closed
                 ) {
-
                   await this.receive(
                     JSON.parse(
                       data
@@ -791,49 +709,59 @@ export class LiveClass {
               }
             )
             .catch(
-              error =>
-                this.fail(
+              error => {
+                console.error(
+                  '[ClassFocus Signal]',
+                  error
+                )
+
+                this.onError?.(
                   error.message
                 )
+              }
             )
       }
 
-
     this.socket.onerror =
-      () => {
+      error => {
+        console.error(
+          '[ClassFocus Signal] Error:',
+          error
+        )
 
-        this.fail(
+        this.onError?.(
           'No se pudo conectar con las clases en vivo.'
         )
       }
 
-
     this.socket.onclose =
-      () => {
+      event => {
+        console.warn(
+          '[ClassFocus Signal] Cerrado:',
+          event.code,
+          event.reason
+        )
 
-        if (!this.closed) {
-
-          this.fail(
+        if (
+          !this.closed
+        ) {
+          this.onError?.(
             'Se perdió la conexión con la clase. Vuelve a entrar.'
           )
         }
       }
   }
 
-
-  // ===================================================
-  // ENVIAR
-  // ===================================================
+  // =====================================================
+  // ENVIAR SIGNAL
+  // =====================================================
 
   send(message) {
-
     if (
       !this.closed &&
-      this.socket
-        ?.readyState ===
+      this.socket?.readyState ===
         WebSocket.OPEN
     ) {
-
       this.socket.send(
         JSON.stringify(
           message
@@ -842,17 +770,12 @@ export class LiveClass {
     }
   }
 
-
-  // ===================================================
+  // =====================================================
   // ACTUALIZAR UI
-  // ===================================================
+  // =====================================================
 
   notify() {
-
-    if (this.closed) {
-      return
-    }
-
+    if (this.closed) return
 
     this.onChange({
       room:
@@ -879,8 +802,7 @@ export class LiveClass {
         this.screen,
 
       outputId:
-        this.outputId ||
-        '',
+        this.outputId || '',
 
       joined:
         this.joined,
@@ -890,118 +812,68 @@ export class LiveClass {
     })
   }
 
-
-  // ===================================================
-  // RECIBIR MENSAJES
-  // ===================================================
+  // =====================================================
+  // MENSAJES DEL SERVIDOR
+  // =====================================================
 
   async receive(message) {
-
     if (
-      message.type ===
-        'error' ||
-
-      message.type ===
-        'ended'
+      message.type === 'error' ||
+      message.type === 'ended'
     ) {
-
-      this.fail(
+      this.onError?.(
         message.message
       )
 
       return
     }
 
-
-    // ===============================================
+    // ===================================================
     // AUTENTICADO
-    // ===============================================
+    // ===================================================
 
     if (
       message.type ===
       'authenticated'
     ) {
-
       this.peerId =
         message.peerId
 
       this.send({
-        type:
-          'join',
-
+        type: 'join',
         subjectId:
           this.subjectId
       })
+
+      return
     }
 
-
-    // ===============================================
-    // ENTRÓ A LA CLASE
-    // ===============================================
+    // ===================================================
+    // JOIN
+    // ===================================================
 
     if (
       message.type ===
       'joined'
     ) {
-
       this.joined =
         true
 
-
-      // =================================================
-      // CORRECCIÓN PRINCIPAL
-      //
-      // Antes el alumno podía entrar con this.camera=null.
-      // Entonces respondía el WebRTC SIN VIDEO.
-      //
-      // Ahora al entrar se activa automáticamente la cámara.
-      // =================================================
-
-      if (
-        this.role ===
-          'student' &&
-
-        !this.camera
-      ) {
-
-        try {
-
-          await this
-            .cameraEnabled(
-              true
-            )
-
-        } catch (error) {
-
-          console.warn(
-            '[ClassFocus] No se pudo activar la cámara automáticamente:',
-            error
-          )
-
-          this.onError?.(
-            `No se pudo activar la cámara: ${error.message}`
-          )
-        }
-      }
-
-
       this.notify()
+
+      return
     }
 
-
-    // ===============================================
-    // ESTADO DE LA SALA
-    // ===============================================
+    // ===================================================
+    // ROOM
+    // ===================================================
 
     if (
       message.type ===
       'room'
     ) {
-
       const previousFloor =
-        this.state
-          ?.floorId
-
+        this.state?.floorId
 
       const previousVideo =
         this.state
@@ -1013,22 +885,17 @@ export class LiveClass {
           )
           ?.video
 
-
       this.state =
         message
 
-
       this.notify()
-
 
       if (
         previousFloor !==
         message.floorId
       ) {
-
         this.floorGeneration++
       }
-
 
       const myVideo =
         message.students
@@ -1039,76 +906,60 @@ export class LiveClass {
           )
           ?.video
 
-
       if (
         this.role ===
           'student' &&
-
         this.screen &&
-
         (
           message.floorId !==
             this.peerId ||
-
           message.teacherVideo
             ?.source ===
             'screen' ||
-
           (
             previousVideo
               ?.source ===
               'screen' &&
-
             myVideo
               ?.source !==
               'screen'
           )
         )
       ) {
-
-        await this
-          .shareScreen(
-            false
-          )
+        await this.shareScreen(
+          false
+        )
       }
-
 
       if (
         this.role ===
           'student' &&
-
         message.floorId !==
           this.peerId &&
-
         this.mic
       ) {
-
-        await this
-          .microphone(
-            false
-          )
+        await this.microphone(
+          false
+        )
       }
-
 
       const expected =
         this.role ===
           'teacher'
-
-          ? message
-              .students
+          ? message.students
               .map(
                 student =>
                   student.peerId
               )
+          : message.teacher
+            ?.peerId
+            ? [
+                message.teacher
+                  .peerId
+              ]
+            : []
 
-          : [
-              message
-                .teacher
-                .peerId
-            ]
-
-
-      // Eliminar peers que ya salieron.
+      // Eliminar peers que ya no están.
       for (
         const [
           id,
@@ -1116,13 +967,11 @@ export class LiveClass {
         ]
         of this.peers
       ) {
-
         if (
           !expected.includes(
             id
           )
         ) {
-
           peer.close()
 
           this.peers.delete(
@@ -1135,32 +984,27 @@ export class LiveClass {
         }
       }
 
-
-      // ===============================================
-      // EL MAESTRO CREA OFFER A CADA ALUMNO
-      // ===============================================
+      // =================================================
+      // MAESTRO CREA OFFER A CADA ALUMNO
+      // =================================================
 
       if (
         this.role ===
         'teacher'
       ) {
-
         for (
           const id
           of expected
         ) {
-
           if (
             !this.peers.has(
               id
             )
           ) {
-
             const peer =
               this.makePeer(
                 id
               )
-
 
             await peer.offer(
               this.videoTrack(),
@@ -1179,43 +1023,36 @@ export class LiveClass {
         }
       }
 
-
-      await this
-        .updateTracks()
-
+      await this.updateTracks()
 
       this.publishVideoState()
 
       this.notify()
+
+      return
     }
 
-
-    // ===============================================
-    // SIGNAL WEBRTC
-    // ===============================================
+    // ===================================================
+    // SIGNAL
+    // ===================================================
 
     if (
       message.type ===
       'signal'
     ) {
-
       let peer =
         this.peers.get(
           message.from
         )
 
-
       if (!peer) {
-
         if (
           this.role !==
             'student' ||
-
           message.from !==
             this.state
               ?.teacher
               ?.peerId ||
-
           ![
             'offer',
             'ice'
@@ -1223,19 +1060,16 @@ export class LiveClass {
             message.data.kind
           )
         ) {
-
           throw new Error(
             'Señal inesperada en la clase.'
           )
         }
-
 
         peer =
           this.makePeer(
             message.from
           )
       }
-
 
       await peer.receive(
         message.data,
@@ -1251,23 +1085,19 @@ export class LiveClass {
     }
   }
 
-
-  // ===================================================
+  // =====================================================
   // CREAR PEER
-  // ===================================================
+  // =====================================================
 
   makePeer(id) {
-
     const peer =
       new ClassPeer({
-
         teacher:
           this.role ===
           'teacher',
 
         configuration:
           this.configuration,
-
 
         send:
           data =>
@@ -1281,34 +1111,38 @@ export class LiveClass {
               data
             }),
 
+        // =================================================
+        // IMPORTANTE:
+        // YA NO HACEMOS this.fail()
+        // porque eso cerraba toda la clase.
+        // =================================================
 
         onFailure:
           text => {
-
             if (
               this.closed
             ) {
               return
             }
 
+            console.warn(
+              '[ClassFocus WebRTC]',
+              text
+            )
 
             if (
               this.role ===
               'teacher'
             ) {
-
-              this.onError(
-                'Un alumno no pudo conectar su audio/video.'
+              this.onError?.(
+                'Un alumno tiene problemas de conexión de audio/video.'
               )
-
             } else {
-
-              this.fail(
+              this.onError?.(
                 text
               )
             }
           },
-
 
         onStreams:
           (
@@ -1316,32 +1150,27 @@ export class LiveClass {
             floor,
             presentation
           ) => {
-
             if (
               this.closed
             ) {
               return
             }
 
-
             console.log(
-              '[ClassFocus] Stream remoto recibido',
+              '[ClassFocus] Stream remoto recibido:',
+              id,
               {
-                peerId:
-                  id,
-
-                videoTracks:
+                video:
                   stream
                     .getVideoTracks()
                     .length,
 
-                audioTracks:
+                audio:
                   stream
                     .getAudioTracks()
                     .length
               }
             )
-
 
             this.remote.set(
               id,
@@ -1352,102 +1181,85 @@ export class LiveClass {
               }
             )
 
-
-            this
-              .updateTracks()
+            this.updateTracks()
               .catch(
-                error =>
-                  this.fail(
+                error => {
+                  console.error(
+                    '[ClassFocus updateTracks]',
+                    error
+                  )
+
+                  this.onError?.(
                     error.message
                   )
+                }
               )
-
 
             this.notify()
           }
       })
-
 
     this.peers.set(
       id,
       peer
     )
 
-
     return peer
   }
 
-
-  // ===================================================
-  // VIDEO
-  // ===================================================
+  // =====================================================
+  // TRACK DE VIDEO
+  // =====================================================
 
   videoTrack() {
-
     return (
       this.role ===
         'teacher'
-
-        ? (
-            this.screen ||
-            this.camera
-          )
-
+        ? this.screen ||
+          this.camera
         : this.camera
     )
       ?.getVideoTracks()[0] ||
       null
   }
 
-
-  // ===================================================
+  // =====================================================
   // AUDIO DEL TURNO
-  // ===================================================
+  // =====================================================
 
   floorTrack(target) {
-
     const id =
-      this.state
-        ?.floorId
-
+      this.state?.floorId
 
     return (
       this.role ===
         'teacher' &&
-
       id &&
-
       id !== target
     )
-      ? (
-          this.remote
-            .get(id)
-            ?.stream
-            ?.getAudioTracks()[0] ||
-          null
-        )
+      ? this.remote
+          .get(id)
+          ?.stream
+          ?.getAudioTracks()[0] ||
+        null
       : null
   }
 
+  // =====================================================
+  // VIDEO DE PANTALLA
+  // =====================================================
 
-  // ===================================================
-  // PANTALLA
-  // ===================================================
-
-  outboundScreen(target) {
-
+  outboundScreen(
+    target
+  ) {
     if (
       this.role ===
       'student'
     ) {
-
-      return (
-        this.screen
-          ?.getVideoTracks()[0] ||
+      return this.screen
+        ?.getVideoTracks()[0] ||
         null
-      )
     }
-
 
     if (
       this.screen
@@ -1455,6 +1267,65 @@ export class LiveClass {
       return null
     }
 
+    const presenter =
+      this.state
+        ?.students
+        ?.find(
+          student =>
+            student.peerId ===
+            this.state?.floorId
+        )
+
+    // Nunca reenviar cámara privada.
+    if (
+      presenter?.video
+        ?.source ===
+        'screen' &&
+      presenter.peerId !==
+        target
+    ) {
+      return this.remote
+        .get(
+          presenter.peerId
+        )
+        ?.presentation
+        ?.getVideoTracks()[0] ||
+        null
+    }
+
+    return null
+  }
+
+  // =====================================================
+  // AUDIO DE PANTALLA
+  // =====================================================
+
+  screenAudioTrack() {
+    return this.screen
+      ?.getAudioTracks()
+      .find(
+        track =>
+          track.readyState !==
+          'ended'
+      ) ||
+      null
+  }
+
+  outboundScreenAudio(
+    target
+  ) {
+    if (
+      this.screen
+    ) {
+      return this.screenAudioTrack()
+    }
+
+    if (
+      this.role !==
+      'teacher'
+    ) {
+      return null
+    }
 
     const presenter =
       this.state
@@ -1462,186 +1333,89 @@ export class LiveClass {
         ?.find(
           student =>
             student.peerId ===
-            this.state
-              ?.floorId
+            this.state?.floorId
         )
 
-
     if (
-      presenter
-        ?.video
+      presenter?.video
         ?.source ===
         'screen' &&
-
       presenter.peerId !==
         target
     ) {
-
-      return (
-        this.remote
-          .get(
-            presenter.peerId
-          )
-          ?.presentation
-          ?.getVideoTracks()[0] ||
-        null
-      )
-    }
-
-
-    return null
-  }
-
-
-  // ===================================================
-  // AUDIO DE PANTALLA
-  // ===================================================
-
-  screenAudioTrack() {
-
-    return (
-      this.screen
+      return this.remote
+        .get(
+          presenter.peerId
+        )
+        ?.presentation
         ?.getAudioTracks()
         .find(
           track =>
             track.readyState !==
             'ended'
         ) ||
-      null
-    )
-  }
-
-
-  outboundScreenAudio(
-    target
-  ) {
-
-    if (
-      this.screen
-    ) {
-
-      return this
-        .screenAudioTrack()
-    }
-
-
-    if (
-      this.role !==
-      'teacher'
-    ) {
-
-      return null
-    }
-
-
-    const presenter =
-      this.state
-        ?.students
-        ?.find(
-          student =>
-            student.peerId ===
-            this.state
-              ?.floorId
-        )
-
-
-    if (
-      presenter
-        ?.video
-        ?.source ===
-        'screen' &&
-
-      presenter.peerId !==
-        target
-    ) {
-
-      return (
-        this.remote
-          .get(
-            presenter.peerId
-          )
-          ?.presentation
-          ?.getAudioTracks()
-          .find(
-            track =>
-              track.readyState !==
-              'ended'
-          ) ||
         null
-      )
     }
-
 
     return null
   }
 
-
-  // ===================================================
-  // PUBLICAR ESTADO DE VIDEO
-  // ===================================================
+  // =====================================================
+  // ESTADO VIDEO
+  // =====================================================
 
   publishVideoState() {
-
     if (
       !this.joined ||
       this.closed
     ) {
-
       return
     }
 
-
     const source =
       this.screen
-
         ? 'screen'
-
         : this.camera
-
           ? 'camera'
-
           : 'off'
 
-
-    const track =
-      (
-        this.screen ||
-        this.camera
-      )
-        ?.getVideoTracks()[0]
-
-
     const key =
-      `${source}:${track?.id || ''}`
-
+      `${source}:${
+        (
+          this.screen ||
+          this.camera
+        )
+          ?.getVideoTracks()[0]
+          ?.id ||
+        ''
+      }`
 
     if (
       key ===
       this.lastVideoKey
     ) {
-
       return
     }
-
 
     this.lastVideoKey =
       key
 
-
     this.send({
-      type:
-        'media',
-
+      type: 'media',
       source
     })
   }
 
-
-  // ===================================================
+  // =====================================================
   // ACTUALIZAR TRACKS
-  // ===================================================
+  // =====================================================
 
   async updateTracks() {
+    if (
+      this.closed
+    ) {
+      return
+    }
 
     await Promise.all(
       [
@@ -1665,41 +1439,34 @@ export class LiveClass {
     )
   }
 
-
-  // ===================================================
-  // CAPTURAR MEDIA
-  // ===================================================
+  // =====================================================
+  // CAPTURAR CÁMARA / MICRO / PANTALLA
+  // =====================================================
 
   async capture(
     constraints,
     display = false
   ) {
-
     if (
       this.closed ||
       !this.joined
     ) {
-
       throw new Error(
         'Entra a la clase antes de activar tus dispositivos.'
       )
     }
 
-
     const generation =
       this.generation
-
 
     const stream =
       await (
         display
-
           ? navigator
               .mediaDevices
               .getDisplayMedia(
                 constraints
               )
-
           : navigator
               .mediaDevices
               .getUserMedia(
@@ -1707,14 +1474,11 @@ export class LiveClass {
               )
       )
 
-
     if (
       this.closed ||
-
       generation !==
         this.generation
     ) {
-
       stream
         .getTracks()
         .forEach(
@@ -1725,22 +1489,18 @@ export class LiveClass {
       return null
     }
 
-
     this.media.add(
       stream
     )
 
-
     return stream
   }
 
-
-  // ===================================================
-  // LIBERAR MEDIA
-  // ===================================================
+  // =====================================================
+  // LIBERAR STREAM
+  // =====================================================
 
   release(stream) {
-
     stream
       ?.getTracks()
       .forEach(
@@ -1748,26 +1508,22 @@ export class LiveClass {
           track.stop()
       )
 
-
     this.media.delete(
       stream
     )
   }
 
-
-  // ===================================================
+  // =====================================================
   // CÁMARA
-  // ===================================================
+  // =====================================================
 
   async cameraEnabled(
     enabled
   ) {
-
     if (
       enabled &&
       !this.camera
     ) {
-
       this.camera =
         await this.capture({
           video: {
@@ -1778,9 +1534,6 @@ export class LiveClass {
             height: {
               ideal: 360
             },
-
-            facingMode:
-              'user',
 
             ...(
               this.cameraId
@@ -1794,29 +1547,19 @@ export class LiveClass {
             )
           },
 
-          audio:
-            false
+          audio: false
         })
-
 
       if (
         this.camera
       ) {
-
         const track =
           this.camera
             .getVideoTracks()[0]
 
-
         if (track) {
-
-          track.enabled =
-            true
-
-
           track.onended =
             () => {
-
               this
                 .cameraEnabled(
                   false
@@ -1830,11 +1573,9 @@ export class LiveClass {
             }
         }
       }
-
     } else if (
       !enabled
     ) {
-
       this.release(
         this.camera
       )
@@ -1843,46 +1584,36 @@ export class LiveClass {
         null
     }
 
-
     this.publishVideoState()
 
     this.notify()
 
-    await this
-      .updateTracks()
+    await this.updateTracks()
   }
 
-
-  // ===================================================
+  // =====================================================
   // MICRÓFONO
-  // ===================================================
+  // =====================================================
 
   async microphone(
     enabled
   ) {
-
     if (
       enabled &&
-
       this.role ===
         'student' &&
-
-      this.state
-        ?.floorId !==
+      this.state?.floorId !==
         this.peerId
     ) {
-
       throw new Error(
         'Pide la palabra y espera la autorización del maestro.'
       )
     }
 
-
     if (
       enabled &&
       !this.mic
     ) {
-
       const stream =
         await this.capture({
           audio: {
@@ -1890,9 +1621,6 @@ export class LiveClass {
               true,
 
             noiseSuppression:
-              true,
-
-            autoGainControl:
               true,
 
             ...(
@@ -1907,46 +1635,34 @@ export class LiveClass {
             )
           },
 
-          video:
-            false
+          video: false
         })
-
 
       if (
         stream &&
-
         this.role ===
           'student' &&
-
-        this.state
-          ?.floorId !==
+        this.state?.floorId !==
           this.peerId
       ) {
-
         this.release(
           stream
         )
-
       } else if (
         stream
       ) {
-
         this.micStream =
           stream
-
 
         this.mic =
           stream
             .getAudioTracks()[0]
 
-
         if (
           this.mic
         ) {
-
           this.mic.onended =
             () => {
-
               this
                 .microphone(
                   false
@@ -1960,11 +1676,9 @@ export class LiveClass {
             }
         }
       }
-
     } else if (
       !enabled
     ) {
-
       this.release(
         this.micStream
       )
@@ -1976,67 +1690,52 @@ export class LiveClass {
         null
     }
 
-
     this.publishVideoState()
 
     this.notify()
 
-    await this
-      .updateTracks()
+    await this.updateTracks()
   }
 
-
-  // ===================================================
+  // =====================================================
   // COMPARTIR PANTALLA
-  // ===================================================
+  // =====================================================
 
   async shareScreen(
     enabled
   ) {
-
     if (
       enabled &&
-
       this.role ===
         'student' &&
-
-      this.state
-        ?.floorId !==
+      this.state?.floorId !==
         this.peerId
     ) {
-
       throw new Error(
         'Pide la palabra y espera la autorización del maestro para presentar.'
       )
     }
 
-
     if (
       enabled &&
-
       this.role ===
         'student' &&
-
       this.state
         ?.teacherVideo
         ?.source ===
         'screen'
     ) {
-
       throw new Error(
         'El maestro está presentando. Espera a que termine para compartir tu pantalla.'
       )
     }
 
-
     if (
       enabled &&
       !this.screen
     ) {
-
       const floorGeneration =
         this.floorGeneration
-
 
       const stream =
         await this.capture(
@@ -2046,8 +1745,7 @@ export class LiveClass {
                 'browser'
             },
 
-            audio:
-              true,
+            audio: true,
 
             selfBrowserSurface:
               'exclude',
@@ -2062,96 +1760,77 @@ export class LiveClass {
           true
         )
 
-
       if (
         stream &&
-
         this.role ===
           'student' &&
-
         (
           this.state
             ?.floorId !==
             this.peerId ||
-
           floorGeneration !==
             this.floorGeneration ||
-
           this.state
             ?.teacherVideo
             ?.source ===
             'screen'
         )
       ) {
-
         this.release(
           stream
         )
-
       } else {
-
         this.screen =
           stream
       }
 
-
       if (
         this.screen
       ) {
-
         const videoTrack =
           this.screen
             .getVideoTracks()[0]
 
-
         if (
           videoTrack
         ) {
-
           videoTrack.onended =
             () => {
-
               this
                 .shareScreen(
                   false
                 )
                 .catch(
                   error =>
-                    this.fail(
-                      error.message
+                    console.error(
+                      error
                     )
                 )
             }
         }
-
 
         for (
           const track
           of this.screen
             .getAudioTracks()
         ) {
-
           track.onended =
             () => {
-
               this.notify()
 
-              this
-                .updateTracks()
+              this.updateTracks()
                 .catch(
                   error =>
-                    this.fail(
-                      error.message
+                    console.error(
+                      error
                     )
                 )
             }
         }
       }
-
     } else if (
       !enabled
     ) {
-
       this.release(
         this.screen
       )
@@ -2160,122 +1839,102 @@ export class LiveClass {
         null
     }
 
-
     this.publishVideoState()
 
     this.notify()
 
-    await this
-      .updateTracks()
+    await this.updateTracks()
   }
 
-
-  // ===================================================
-  // MANO
-  // ===================================================
+  // =====================================================
+  // LEVANTAR MANO
+  // =====================================================
 
   hand(raised) {
-
     this.send({
-      type:
-        'hand',
-
+      type: 'hand',
       raised
     })
   }
 
-
-  // ===================================================
-  // TURNO
-  // ===================================================
+  // =====================================================
+  // DAR TURNO
+  // =====================================================
 
   floor(peerId) {
-
     this.send({
-      type:
-        'floor',
-
+      type: 'floor',
       peerId
     })
   }
 
-
-  // ===================================================
-  // ERROR
-  // ===================================================
+  // =====================================================
+  // ERROR GRAVE
+  // =====================================================
 
   fail(message) {
-
     if (
       this.closed
     ) {
       return
     }
 
-    this.stop()
+    console.error(
+      '[ClassFocus]',
+      message
+    )
 
-    this.onError(
+    this.onError?.(
       message
     )
   }
 
-
-  // ===================================================
+  // =====================================================
   // SALIR
-  // ===================================================
+  // =====================================================
 
   stop() {
-
     if (
       this.closed
     ) {
       return
     }
 
-
     this.send({
-      type:
-        'leave'
+      type: 'leave'
     })
-
 
     this.closed =
       true
 
-
     this.generation++
 
+    try {
+      this.socket?.close()
+    } catch {
+      // Ignorar
+    }
 
-    this.socket
-      ?.close()
-
-
-    this.peers
-      .forEach(
-        peer =>
-          peer.close()
-      )
-
+    this.peers.forEach(
+      peer =>
+        peer.close()
+    )
 
     this.peers.clear()
 
     this.remote.clear()
 
-
-    this.media
-      .forEach(
-        stream =>
-          stream
-            .getTracks()
-            .forEach(
-              track =>
-                track.stop()
-            )
-      )
-
+    this.media.forEach(
+      stream =>
+        stream
+          .getTracks()
+          .forEach(
+            track =>
+              track.stop()
+          )
+    )
 
     this.media.clear()
-
 
     this.camera =
       null
@@ -2288,7 +1947,6 @@ export class LiveClass {
 
     this.micStream =
       null
-
 
     this.onClose?.()
   }
