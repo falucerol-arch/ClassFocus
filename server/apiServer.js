@@ -9,6 +9,12 @@ import { createSessionAuth, requireRole } from './auth.js'
 import { HttpError } from './errors.js'
 import { createClassroomRouter } from './classroom/router.js'
 
+const VALID_ROLES = new Set([
+  'student',
+  'teacher',
+  'admin'
+])
+
 export function createApp({
   db = pool,
   transaction = withTransaction,
@@ -19,11 +25,10 @@ export function createApp({
   const auth = createSessionAuth(db)
 
   const frontendOrigin = new URL(
-    process.env.FRONTEND_URL || 'http://localhost:5173'
+    process.env.FRONTEND_URL ||
+    'http://localhost:5173'
   ).origin
 
-  // La cookie del callback OAuth solo se acepta
-  // desde el frontend configurado.
   app.use(
     cors({
       origin: frontendOrigin,
@@ -31,20 +36,83 @@ export function createApp({
     })
   )
 
-  app.use(express.json({ limit: '3mb' }))
+  app.use(
+    express.json({
+      limit: '3mb'
+    })
+  )
 
-  app.use('/api', (_req, res, next) => {
-    res.set('Cache-Control', 'no-store')
-    next()
-  })
+  app.use(
+    '/api',
+    (_req, res, next) => {
+      res.set(
+        'Cache-Control',
+        'no-store'
+      )
 
-  const mapUser = row => ({
-    id: row.id,
-    name: row.name,
-    email: row.email,
-    role: row.role,
-    source: row.source
-  })
+      next()
+    }
+  )
+
+  // =========================================================
+  // HELPERS
+  // =========================================================
+
+  const normalizeRoles = user => {
+    const values =
+      Array.isArray(user?.roles)
+        ? user.roles
+        : [user?.role]
+
+    const roles = [
+      ...new Set(
+        values
+          .map(role =>
+            String(role || '')
+              .trim()
+          )
+          .filter(role =>
+            VALID_ROLES.has(role)
+          )
+      )
+    ]
+
+    if (!roles.length) {
+      throw new HttpError(
+        400,
+        'El usuario debe tener al menos un rol válido.'
+      )
+    }
+
+    return roles
+  }
+
+  const mapUser = row => {
+    const roles =
+      Array.isArray(row.roles)
+        ? row.roles
+        : row.role
+          ? [row.role]
+          : []
+
+    return {
+      id: row.id,
+      name: row.name,
+      email: row.email,
+
+      // role representa el perfil ACTIVO
+      // cuando viene de una sesión.
+      role: row.role,
+
+      // roles contiene todos los perfiles
+      // disponibles para esa persona.
+      roles,
+
+      source:
+        row.source ||
+        'classfocus'
+    }
+  }
 
   const mapSubject = row => ({
     id: row.id,
@@ -52,29 +120,68 @@ export function createApp({
     code: row.code,
     section: row.section || '',
     schedule: row.schedule || '',
-    defaultTeacherId: row.default_teacher_id,
-    source: row.source || 'classfocus',
-    classroomId: row.classroom_id || undefined,
-    classroomUrl: row.classroom_url || '',
-    courseWork: row.course_work || [],
-    classroomSyncedAt: row.classroom_synced_at,
-    classroomTeachers: row.classroom_teachers || []
+
+    defaultTeacherId:
+      row.default_teacher_id,
+
+    source:
+      row.source ||
+      'classfocus',
+
+    classroomId:
+      row.classroom_id ||
+      undefined,
+
+    classroomUrl:
+      row.classroom_url ||
+      '',
+
+    courseWork:
+      row.course_work ||
+      [],
+
+    classroomSyncedAt:
+      row.classroom_synced_at,
+
+    classroomTeachers:
+      row.classroom_teachers ||
+      []
   })
 
   const mapExam = row => ({
     id: row.id,
-    teacherId: row.teacher_id,
-    subjectId: row.subject_id,
-    title: row.title,
-    instructions: row.instructions || '',
-    durationMinutes: row.duration_minutes,
-    formUrl: row.form_url || '',
-    status: row.status,
+
+    teacherId:
+      row.teacher_id,
+
+    subjectId:
+      row.subject_id,
+
+    title:
+      row.title,
+
+    instructions:
+      row.instructions ||
+      '',
+
+    durationMinutes:
+      row.duration_minutes,
+
+    formUrl:
+      row.form_url ||
+      '',
+
+    status:
+      row.status,
+
     createdAt:
-      row.created_at?.toISOString?.() ||
+      row.created_at
+        ?.toISOString?.() ||
       row.created_at,
+
     updatedAt:
-      row.updated_at?.toISOString?.() ||
+      row.updated_at
+        ?.toISOString?.() ||
       row.updated_at
   })
 
@@ -82,77 +189,227 @@ export function createApp({
   // HEALTH
   // =========================================================
 
-  app.get('/api/health', async (_req, res) => {
-    try {
-      const result = await db.query(
-        'SELECT NOW() AS now, current_database() AS database'
-      )
+  app.get(
+    '/api/health',
+    async (_req, res) => {
+      try {
+        const result =
+          await db.query(
+            `
+            SELECT
+              NOW() AS now,
+              current_database() AS database
+            `
+          )
+
+        res.json({
+          ok: true,
+
+          database:
+            result.rows[0].database,
+
+          time:
+            result.rows[0].now
+        })
+      } catch {
+        res
+          .status(503)
+          .json({
+            ok: false,
+
+            error:
+              'PostgreSQL no está disponible.'
+          })
+      }
+    }
+  )
+
+  // =========================================================
+  // LOGIN MULTIRROL
+  // =========================================================
+
+  app.post(
+    '/api/auth/login',
+    async (req, res) => {
+      const {
+        email,
+        password,
+        role
+      } = req.body || {}
+
+      // ---------------------------------------------
+      // Buscar únicamente por correo.
+      //
+      // La identidad ya NO depende del rol.
+      // ---------------------------------------------
+
+      const result =
+        await db.query(
+          `
+          SELECT
+            u.id,
+            u.name,
+            u.email,
+            u.password_hash,
+            u.role,
+            u.source,
+
+            COALESCE(
+              (
+                SELECT ARRAY_AGG(
+                  ur.role
+                  ORDER BY ur.role
+                )
+
+                FROM user_roles ur
+
+                WHERE
+                  ur.user_id = u.id
+              ),
+
+              ARRAY[u.role]::varchar[]
+            ) AS roles
+
+          FROM users u
+
+          WHERE
+            LOWER(u.email) =
+            LOWER($1)
+
+          LIMIT 1
+          `,
+          [
+            String(
+              email ||
+              ''
+            ).trim()
+          ]
+        )
+
+      const user =
+        result.rows[0]
+
+      if (
+        !user ||
+        !(
+          await bcrypt.compare(
+            password || '',
+            user.password_hash
+          )
+        )
+      ) {
+        return res
+          .status(401)
+          .json({
+            message:
+              'Correo o contraseña incorrectos.'
+          })
+      }
+
+      const userRoles =
+        Array.isArray(user.roles)
+          ? user.roles
+          : [user.role]
+
+      // ---------------------------------------------
+      // Si el frontend todavía envía role,
+      // utilizamos ese perfil.
+      // ---------------------------------------------
+
+      let selectedRole =
+        role
+          ? String(role)
+          : null
+
+      if (selectedRole) {
+        if (
+          !userRoles.includes(
+            selectedRole
+          )
+        ) {
+          return res
+            .status(401)
+            .json({
+              message:
+                'Este usuario no tiene asignado ese perfil.',
+
+              roles:
+                userRoles
+            })
+        }
+      } else {
+        // -------------------------------------------
+        // Si tiene un solo rol, entrar directamente.
+        // -------------------------------------------
+
+        if (
+          userRoles.length === 1
+        ) {
+          selectedRole =
+            userRoles[0]
+        } else {
+          // -----------------------------------------
+          // Futuro selector de perfiles.
+          // -----------------------------------------
+
+          return res
+            .status(409)
+            .json({
+              message:
+                'Selecciona el perfil con el que deseas entrar.',
+
+              requiresRoleSelection:
+                true,
+
+              roles:
+                userRoles,
+
+              user: {
+                id:
+                  user.id,
+
+                name:
+                  user.name,
+
+                email:
+                  user.email,
+
+                roles:
+                  userRoles,
+
+                source:
+                  user.source
+              }
+            })
+        }
+      }
+
+      const token =
+        await auth.issue(
+          user.id,
+          selectedRole
+        )
 
       res.json({
-        ok: true,
-        database: result.rows[0].database,
-        time: result.rows[0].now
-      })
-    } catch {
-      res.status(503).json({
-        ok: false,
-        error: 'PostgreSQL no está disponible.'
-      })
-    }
-  })
+        user: {
+          ...mapUser(user),
 
-  // =========================================================
-  // LOGIN
-  // =========================================================
+          role:
+            selectedRole,
 
-  app.post('/api/auth/login', async (req, res) => {
-    const {
-      email,
-      password,
-      role
-    } = req.body || {}
+          roles:
+            userRoles
+        },
 
-    const result = await db.query(
-      `SELECT *
-       FROM users
-       WHERE LOWER(email) = LOWER($1)
-       AND role = $2
-       LIMIT 1`,
-      [
-        email || '',
-        role || ''
-      ]
-    )
-
-    const user = result.rows[0]
-
-    if (
-      !user ||
-      !(await bcrypt.compare(
-        password || '',
-        user.password_hash
-      ))
-    ) {
-      return res.status(401).json({
-        message:
-          'Credenciales incorrectas o rol inválido.'
+        token
       })
     }
-
-    const token = await auth.issue(user.id)
-
-    res.json({
-      user: mapUser(user),
-      token
-    })
-  })
+  )
 
   // =========================================================
   // GOOGLE CLASSROOM
   // =========================================================
 
-  // Classroom tiene callback público validado
-  // y el resto de sus rutas exige sesión.
   app.use(
     '/api/classroom',
     createClassroomRouter({
@@ -163,340 +420,632 @@ export function createApp({
     })
   )
 
-  // Desde aquí todas las rutas necesitan usuario.
-  app.use('/api', auth.requireUser)
+  // Desde aquí todas las rutas
+  // requieren sesión.
+  app.use(
+    '/api',
+    auth.requireUser
+  )
 
   // =========================================================
   // SESIÓN
   // =========================================================
 
-  app.get('/api/auth/me', (req, res) => {
-    res.json({
-      user: mapUser(req.user)
-    })
-  })
+  app.get(
+    '/api/auth/me',
+    (req, res) => {
+      res.json({
+        user:
+          mapUser(req.user)
+      })
+    }
+  )
 
-  app.post('/api/auth/logout', async (req, res) => {
-    await db.query(
-      'DELETE FROM app_sessions WHERE token_hash=$1',
-      [
-        req.user.token_hash
-      ]
-    )
+  // =========================================================
+  // CAMBIAR PERFIL ACTIVO
+  // =========================================================
 
-    res.json({
-      ok: true
-    })
-  })
+  app.post(
+    '/api/auth/switch-role',
+    async (req, res) => {
+      const role =
+        String(
+          req.body?.role ||
+          ''
+        )
+
+      if (
+        !VALID_ROLES.has(role)
+      ) {
+        throw new HttpError(
+          400,
+          'Perfil inválido.'
+        )
+      }
+
+      if (
+        !req.user.roles.includes(
+          role
+        )
+      ) {
+        throw new HttpError(
+          403,
+          'No tienes asignado ese perfil.'
+        )
+      }
+
+      const match =
+        /^Bearer ([A-Za-z0-9_-]{43})$/
+          .exec(
+            req.headers
+              .authorization ||
+            ''
+          )
+
+      if (!match) {
+        throw new HttpError(
+          401,
+          'Inicia sesión nuevamente.'
+        )
+      }
+
+      await auth.switchRole(
+        match[1],
+        role
+      )
+
+      res.json({
+        ok: true,
+
+        user: {
+          ...mapUser(req.user),
+          role
+        }
+      })
+    }
+  )
+
+  // =========================================================
+  // LOGOUT
+  // =========================================================
+
+  app.post(
+    '/api/auth/logout',
+    async (req, res) => {
+      await db.query(
+        `
+        DELETE FROM app_sessions
+        WHERE token_hash=$1
+        `,
+        [
+          req.user.token_hash
+        ]
+      )
+
+      res.json({
+        ok: true
+      })
+    }
+  )
 
   // =========================================================
   // VALIDACIÓN DE MAESTRO
   // =========================================================
 
-  const canTeach = async (user, subjectId) => {
-    if (user.role === 'admin') {
-      return true
-    }
+  const canTeach =
+    async (
+      user,
+      subjectId
+    ) => {
+      if (
+        user.role ===
+        'admin'
+      ) {
+        return true
+      }
 
-    if (user.role !== 'teacher') {
-      return false
-    }
+      if (
+        user.role !==
+        'teacher'
+      ) {
+        return false
+      }
 
-    const result = await db.query(
-      `
-      SELECT id
-      FROM subjects
-      WHERE id=$1
-      AND (
-        default_teacher_id=$2
+      const result =
+        await db.query(
+          `
+          SELECT id
 
-        OR EXISTS (
-          SELECT 1
-          FROM enrollments
-          WHERE subject_id=$1
-          AND teacher_id=$2
+          FROM subjects
+
+          WHERE id=$1
+
+          AND (
+            default_teacher_id=$2
+
+            OR EXISTS (
+              SELECT 1
+
+              FROM enrollments
+
+              WHERE
+                subject_id=$1
+
+              AND
+                teacher_id=$2
+            )
+          )
+          `,
+          [
+            subjectId,
+            user.id
+          ]
         )
-      )
-      `,
-      [
-        subjectId,
-        user.id
-      ]
-    )
 
-    return Boolean(result.rowCount)
-  }
+      return Boolean(
+        result.rowCount
+      )
+    }
 
   // =========================================================
   // BOOTSTRAP
   // =========================================================
 
-  app.get('/api/bootstrap', async (req, res) => {
-    const metricScope =
-      req.user.role === 'admin'
-        ? 'TRUE'
-        : req.user.role === 'student'
-          ? 'student_id=$1'
-          : `
-            subject_id IN (
-              SELECT id
-              FROM subjects
-              WHERE default_teacher_id=$1
+  app.get(
+    '/api/bootstrap',
+    async (req, res) => {
+      const metricScope =
+        req.user.role ===
+        'admin'
 
-              UNION
+          ? 'TRUE'
 
-              SELECT subject_id
-              FROM enrollments
-              WHERE teacher_id=$1
-            )
-          `
+          : req.user.role ===
+            'student'
 
-    const metricParams =
-      req.user.role === 'admin'
-        ? []
-        : [req.user.id]
+            ? 'student_id=$1'
 
-    const [
-      usersResult,
-      subjectsResult,
-      enrollmentsResult,
-      examsResult,
-      incidentsResult,
-      samplesResult
-    ] = await Promise.all([
-      db.query(
-        'SELECT id,name,email,role,source FROM users ORDER BY id'
-      ),
+            : `
+              subject_id IN (
+                SELECT id
+                FROM subjects
+                WHERE default_teacher_id=$1
 
-      db.query(
-        'SELECT * FROM subjects ORDER BY name'
-      ),
+                UNION
 
-      db.query(
-        `
-        SELECT
-          student_id,
-          teacher_id,
-          subject_id
-        FROM enrollments
-        ORDER BY student_id, teacher_id
-        `
-      ),
-
-      db.query(
-        'SELECT * FROM exams ORDER BY created_at DESC'
-      ),
-
-      db.query(
-        `
-        SELECT *
-        FROM incidents
-        WHERE ${metricScope}
-        ORDER BY occurred_at DESC
-        LIMIT 1000
-        `,
-        metricParams
-      ),
-
-      db.query(
-        `
-        SELECT *
-        FROM attention_samples
-        WHERE ${metricScope}
-        ORDER BY captured_at DESC
-        LIMIT 2500
-        `,
-        metricParams
-      )
-    ])
-
-    // Los paneles reciben solo sus materias
-    // y participantes.
-    // El rol se toma de la sesión.
-
-    const user = req.user
-
-    const allowedSubjects = new Set(
-      subjectsResult.rows
-        .filter(subject =>
-          user.role === 'admin' ||
-
-          (
-            user.role === 'teacher' &&
-            Number(subject.default_teacher_id) === user.id
-          ) ||
-
-          enrollmentsResult.rows.some(
-            row =>
-              row.subject_id === subject.id &&
-
-              (
-                user.role === 'teacher'
-                  ? row.teacher_id === user.id
-                  : row.student_id === user.id
+                SELECT subject_id
+                FROM enrollments
+                WHERE teacher_id=$1
               )
+            `
+
+      const metricParams =
+        req.user.role ===
+        'admin'
+
+          ? []
+
+          : [
+              req.user.id
+            ]
+
+      const [
+        usersResult,
+        subjectsResult,
+        enrollmentsResult,
+        examsResult,
+        incidentsResult,
+        samplesResult
+      ] =
+        await Promise.all([
+          // -------------------------------------------
+          // Usuarios con todos sus roles.
+          // -------------------------------------------
+
+          db.query(
+            `
+            SELECT
+              u.id,
+              u.name,
+              u.email,
+              u.role,
+              u.source,
+
+              COALESCE(
+                (
+                  SELECT ARRAY_AGG(
+                    ur.role
+                    ORDER BY ur.role
+                  )
+
+                  FROM user_roles ur
+
+                  WHERE
+                    ur.user_id = u.id
+                ),
+
+                ARRAY[u.role]::varchar[]
+              ) AS roles
+
+            FROM users u
+
+            ORDER BY
+              u.id
+            `
+          ),
+
+          db.query(
+            `
+            SELECT *
+            FROM subjects
+            ORDER BY name
+            `
+          ),
+
+          db.query(
+            `
+            SELECT
+              student_id,
+              teacher_id,
+              subject_id
+
+            FROM enrollments
+
+            ORDER BY
+              student_id,
+              teacher_id
+            `
+          ),
+
+          db.query(
+            `
+            SELECT *
+            FROM exams
+            ORDER BY created_at DESC
+            `
+          ),
+
+          db.query(
+            `
+            SELECT *
+            FROM incidents
+
+            WHERE
+              ${metricScope}
+
+            ORDER BY
+              occurred_at DESC
+
+            LIMIT 1000
+            `,
+            metricParams
+          ),
+
+          db.query(
+            `
+            SELECT *
+            FROM attention_samples
+
+            WHERE
+              ${metricScope}
+
+            ORDER BY
+              captured_at DESC
+
+            LIMIT 2500
+            `,
+            metricParams
           )
-        )
-        .map(subject => subject.id)
-    )
+        ])
 
-    const enrollments =
-      enrollmentsResult.rows.filter(
-        row =>
-          allowedSubjects.has(row.subject_id) &&
+      const user =
+        req.user
 
-          (
-            user.role !== 'student' ||
-            row.student_id === user.id
-          )
-      )
+      // =====================================================
+      // MATERIAS VISIBLES
+      // =====================================================
 
-    const visibleUsers = new Set([
-      user.id
-    ])
-
-    enrollments.forEach(row => {
-      visibleUsers.add(row.student_id)
-      visibleUsers.add(row.teacher_id)
-    })
-
-    subjectsResult.rows
-      .filter(row =>
-        allowedSubjects.has(row.id)
-      )
-      .forEach(row =>
-        visibleUsers.add(
-          row.default_teacher_id
-        )
-      )
-
-    const ownMetric = row =>
-      user.role === 'admin' ||
-
-      (
-        allowedSubjects.has(
-          row.subject_id
-        ) &&
-
-        (
-          user.role !== 'student' ||
-          row.student_id === user.id
-        )
-      )
-
-    const grouped = new Map()
-
-    for (const row of enrollments) {
-      const key =
-        `${row.student_id}:${row.teacher_id}`
-
-      const item =
-        grouped.get(key) || {
-          studentId: row.student_id,
-          teacherId: row.teacher_id,
-          subjectIds: []
-        }
-
-      item.subjectIds.push(
-        row.subject_id
-      )
-
-      grouped.set(
-        key,
-        item
-      )
-    }
-
-    res.json({
-      academic: {
-        users:
-          usersResult.rows
-            .filter(
-              row =>
-                user.role === 'admin' ||
-                visibleUsers.has(row.id)
-            )
-            .map(mapUser),
-
-        subjects:
+      const allowedSubjects =
+        new Set(
           subjectsResult.rows
-            .filter(row =>
-              allowedSubjects.has(row.id)
-            )
-            .map(mapSubject),
-
-        assignments:
-          [...grouped.values()]
-      },
-
-      exams:
-        examsResult.rows
-          .filter(
-            row =>
-              user.role === 'admin' ||
-
-              (
-                allowedSubjects.has(
-                  row.subject_id
-                ) &&
+            .filter(
+              subject =>
+                user.role ===
+                  'admin' ||
 
                 (
-                  user.role === 'teacher'
-                    ? row.teacher_id === user.id
-                    : row.status === 'published'
+                  user.role ===
+                    'teacher' &&
+
+                  Number(
+                    subject.default_teacher_id
+                  ) ===
+                    user.id
+                ) ||
+
+                enrollmentsResult.rows.some(
+                  row =>
+                    row.subject_id ===
+                      subject.id &&
+
+                    (
+                      user.role ===
+                      'teacher'
+
+                        ? row.teacher_id ===
+                          user.id
+
+                        : row.student_id ===
+                          user.id
+                    )
                 )
+            )
+            .map(
+              subject =>
+                subject.id
+            )
+        )
+
+      // =====================================================
+      // MATRÍCULAS VISIBLES
+      // =====================================================
+
+      const enrollments =
+        enrollmentsResult.rows
+          .filter(
+            row =>
+              allowedSubjects.has(
+                row.subject_id
+              ) &&
+
+              (
+                user.role !==
+                  'student' ||
+
+                row.student_id ===
+                  user.id
               )
           )
-          .map(mapExam),
 
-      incidents:
-        incidentsResult.rows
-          .filter(ownMetric)
-          .map(row => ({
-            id: String(row.id),
-            studentId: row.student_id,
-            subjectId: row.subject_id,
-            examId: row.exam_id,
-            type: row.type,
-            message: row.message,
-            severity: row.severity,
+      // =====================================================
+      // USUARIOS VISIBLES
+      // =====================================================
 
-            timestamp:
-              row.occurred_at
-                ?.toISOString?.() ||
-              row.occurred_at
-          })),
+      const visibleUsers =
+        new Set([
+          user.id
+        ])
 
-      samples:
-        samplesResult.rows
-          .filter(ownMetric)
-          .map(row => ({
-            id: String(row.id),
-            studentId: row.student_id,
-            subjectId: row.subject_id,
+      enrollments.forEach(
+        row => {
+          visibleUsers.add(
+            row.student_id
+          )
 
-            attention:
-              Number(row.attention),
+          visibleUsers.add(
+            row.teacher_id
+          )
+        }
+      )
 
-            expression:
-              row.expression,
+      subjectsResult.rows
+        .filter(
+          row =>
+            allowedSubjects.has(
+              row.id
+            )
+        )
+        .forEach(
+          row => {
+            if (
+              row.default_teacher_id
+            ) {
+              visibleUsers.add(
+                row.default_teacher_id
+              )
+            }
+          }
+        )
 
-            gaze:
-              row.gaze,
+      // =====================================================
+      // MÉTRICAS
+      // =====================================================
 
-            label:
-              row.label,
+      const ownMetric =
+        row =>
+          user.role ===
+            'admin' ||
 
-            timestamp:
-              row.captured_at
-                ?.toISOString?.() ||
-              row.captured_at
-          }))
-    })
-  })
+          (
+            allowedSubjects.has(
+              row.subject_id
+            ) &&
+
+            (
+              user.role !==
+                'student' ||
+
+              row.student_id ===
+                user.id
+            )
+          )
+
+      // =====================================================
+      // AGRUPAR ASIGNACIONES
+      // =====================================================
+
+      const grouped =
+        new Map()
+
+      for (
+        const row
+        of enrollments
+      ) {
+        const key =
+          `${row.student_id}:${row.teacher_id}`
+
+        const item =
+          grouped.get(key) ||
+          {
+            studentId:
+              row.student_id,
+
+            teacherId:
+              row.teacher_id,
+
+            subjectIds: []
+          }
+
+        item.subjectIds.push(
+          row.subject_id
+        )
+
+        grouped.set(
+          key,
+          item
+        )
+      }
+
+      res.json({
+        academic: {
+          users:
+            usersResult.rows
+              .filter(
+                row =>
+                  user.role ===
+                    'admin' ||
+
+                  visibleUsers.has(
+                    row.id
+                  )
+              )
+              .map(
+                mapUser
+              ),
+
+          subjects:
+            subjectsResult.rows
+              .filter(
+                row =>
+                  allowedSubjects.has(
+                    row.id
+                  )
+              )
+              .map(
+                mapSubject
+              ),
+
+          assignments:
+            [
+              ...grouped.values()
+            ]
+        },
+
+        exams:
+          examsResult.rows
+            .filter(
+              row =>
+                user.role ===
+                  'admin' ||
+
+                (
+                  allowedSubjects.has(
+                    row.subject_id
+                  ) &&
+
+                  (
+                    user.role ===
+                    'teacher'
+
+                      ? row.teacher_id ===
+                        user.id
+
+                      : row.status ===
+                        'published'
+                  )
+                )
+            )
+            .map(
+              mapExam
+            ),
+
+        incidents:
+          incidentsResult.rows
+            .filter(
+              ownMetric
+            )
+            .map(
+              row => ({
+                id:
+                  String(row.id),
+
+                studentId:
+                  row.student_id,
+
+                subjectId:
+                  row.subject_id,
+
+                examId:
+                  row.exam_id,
+
+                type:
+                  row.type,
+
+                message:
+                  row.message,
+
+                severity:
+                  row.severity,
+
+                timestamp:
+                  row.occurred_at
+                    ?.toISOString?.() ||
+                  row.occurred_at
+              })
+            ),
+
+        samples:
+          samplesResult.rows
+            .filter(
+              ownMetric
+            )
+            .map(
+              row => ({
+                id:
+                  String(row.id),
+
+                studentId:
+                  row.student_id,
+
+                subjectId:
+                  row.subject_id,
+
+                attention:
+                  Number(
+                    row.attention
+                  ),
+
+                expression:
+                  row.expression,
+
+                gaze:
+                  row.gaze,
+
+                label:
+                  row.label,
+
+                timestamp:
+                  row.captured_at
+                    ?.toISOString?.() ||
+                  row.captured_at
+              })
+            )
+      })
+    }
+  )
 
   // =========================================================
-  // DATOS ACADÉMICOS
+  // DATOS ACADÉMICOS / SUPER ADMIN
   // =========================================================
 
   app.put(
@@ -507,14 +1056,17 @@ export function createApp({
         users = [],
         subjects = [],
         assignments = []
-      } = req.body || {}
+      } =
+        req.body || {}
 
       if (
         ![
           users,
           subjects,
           assignments
-        ].every(Array.isArray)
+        ].every(
+          Array.isArray
+        )
       ) {
         throw new HttpError(
           400,
@@ -524,20 +1076,25 @@ export function createApp({
 
       await transaction(
         async client => {
-          // Comparte el bloqueo con el importador
-          // para proteger guardados concurrentes.
+          // =================================================
+          // BLOQUEO
+          // =================================================
+
           await client.query(
             `
-            SELECT pg_advisory_xact_lock(
-              hashtext(
-                'classfocus-classroom-import'
+            SELECT
+              pg_advisory_xact_lock(
+                hashtext(
+                  'classfocus-classroom-import'
+                )
               )
-            )
             `
           )
 
-          // Una pestaña antigua del admin
-          // no debe sobrescribir las matrículas importadas.
+          // =================================================
+          // MATERIAS IMPORTADAS
+          // =================================================
+
           const imported =
             await client.query(
               `
@@ -550,9 +1107,14 @@ export function createApp({
           const importedIds =
             new Set(
               imported.rows.map(
-                row => row.id
+                row =>
+                  row.id
               )
             )
+
+          // =================================================
+          // USUARIOS EXISTENTES
+          // =================================================
 
           const existing =
             await client.query(
@@ -561,34 +1123,43 @@ export function createApp({
                 id,
                 email,
                 password_hash,
-                source
+                source,
+                role
+
               FROM users
               `
             )
 
-          const importedUsers =
-            new Set(
-              existing.rows
-                .filter(
-                  row =>
-                    row.source ===
-                    'google-classroom'
-                )
-                .map(
-                  row =>
-                    Number(row.id)
-                )
-            )
+          const existingById =
+            new Map()
+
+          const existingByEmail =
+            new Map()
 
           const passwordById =
-            new Map(
-              existing.rows.map(
-                row => [
-                  Number(row.id),
-                  row.password_hash
-                ]
-              )
+            new Map()
+
+          for (
+            const row
+            of existing.rows
+          ) {
+            existingById.set(
+              Number(row.id),
+              row
             )
+
+            existingByEmail.set(
+              String(row.email)
+                .trim()
+                .toLowerCase(),
+              row
+            )
+
+            passwordById.set(
+              Number(row.id),
+              row.password_hash
+            )
+          }
 
           const defaultHash =
             await bcrypt.hash(
@@ -596,61 +1167,339 @@ export function createApp({
               10
             )
 
-          for (const user of users) {
+          // incoming ID -> ID real
+          const resolvedUserIds =
+            new Map()
+
+          // =================================================
+          // CREAR / ACTUALIZAR USUARIOS
+          // =================================================
+
+          for (
+            const incomingUser
+            of users
+          ) {
+            const name =
+              String(
+                incomingUser.name ||
+                ''
+              ).trim()
+
+            const email =
+              String(
+                incomingUser.email ||
+                ''
+              ).trim()
+
             if (
-              importedUsers.has(
-                Number(user.id)
-              )
+              !name ||
+              !email
             ) {
+              throw new HttpError(
+                400,
+                'Nombre y correo son obligatorios.'
+              )
+            }
+
+            const emailKey =
+              email.toLowerCase()
+
+            const incomingId =
+              Number(
+                incomingUser.id
+              )
+
+            const hasIncomingId =
+              Number.isInteger(
+                incomingId
+              ) &&
+              incomingId > 0
+
+            // ---------------------------------------------
+            // Si el correo ya existe:
+            // reutilizamos la misma PERSONA.
+            // ---------------------------------------------
+
+            const sameEmailUser =
+              existingByEmail.get(
+                emailKey
+              )
+
+            // ---------------------------------------------
+            // Los usuarios importados por Classroom
+            // conservan su identidad.
+            // ---------------------------------------------
+
+            if (
+              sameEmailUser?.source ===
+              'google-classroom'
+            ) {
+              if (
+                hasIncomingId
+              ) {
+                resolvedUserIds.set(
+                  incomingId,
+                  Number(
+                    sameEmailUser.id
+                  )
+                )
+              }
+
               continue
             }
 
+            const roles =
+              normalizeRoles(
+                incomingUser
+              )
+
+            let primaryRole =
+              String(
+                incomingUser.role ||
+                ''
+              )
+
+            if (
+              !roles.includes(
+                primaryRole
+              )
+            ) {
+              // Prioridad para compatibilidad.
+              if (
+                roles.includes(
+                  'admin'
+                )
+              ) {
+                primaryRole =
+                  'admin'
+              } else if (
+                roles.includes(
+                  'teacher'
+                )
+              ) {
+                primaryRole =
+                  'teacher'
+              } else {
+                primaryRole =
+                  roles[0]
+              }
+            }
+
+            let actualId =
+              sameEmailUser
+                ? Number(
+                    sameEmailUser.id
+                  )
+                : (
+                    hasIncomingId
+                      ? incomingId
+                      : null
+                  )
+
+            const existingAtId =
+              actualId
+                ? existingById.get(
+                    actualId
+                  )
+                : null
+
+            // ---------------------------------------------
+            // Crear/actualizar usando ID existente.
+            // ---------------------------------------------
+
+            if (actualId) {
+              const passwordHash =
+                passwordById.get(
+                  actualId
+                ) ||
+                defaultHash
+
+              await client.query(
+                `
+                INSERT INTO users (
+                  id,
+                  name,
+                  email,
+                  password_hash,
+                  role,
+                  source
+                )
+
+                VALUES (
+                  $1,
+                  $2,
+                  $3,
+                  $4,
+                  $5,
+                  $6
+                )
+
+                ON CONFLICT (id)
+
+                DO UPDATE SET
+                  name =
+                    EXCLUDED.name,
+
+                  email =
+                    EXCLUDED.email,
+
+                  role =
+                    EXCLUDED.role,
+
+                  source =
+                    EXCLUDED.source,
+
+                  updated_at =
+                    NOW()
+                `,
+                [
+                  actualId,
+                  name,
+                  email,
+                  passwordHash,
+                  primaryRole,
+
+                  incomingUser.source ||
+                  existingAtId?.source ||
+                  sameEmailUser?.source ||
+                  'classfocus'
+                ]
+              )
+            } else {
+              // -------------------------------------------
+              // Permite crear un usuario sin ID manual.
+              // -------------------------------------------
+
+              const created =
+                await client.query(
+                  `
+                  INSERT INTO users (
+                    name,
+                    email,
+                    password_hash,
+                    role,
+                    source
+                  )
+
+                  VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    $4,
+                    $5
+                  )
+
+                  RETURNING id
+                  `,
+                  [
+                    name,
+                    email,
+                    defaultHash,
+                    primaryRole,
+
+                    incomingUser.source ||
+                    'classfocus'
+                  ]
+                )
+
+              actualId =
+                Number(
+                  created.rows[0].id
+                )
+            }
+
+            if (
+              hasIncomingId
+            ) {
+              resolvedUserIds.set(
+                incomingId,
+                actualId
+              )
+            }
+
+            // ---------------------------------------------
+            // Actualizar roles.
+            // ---------------------------------------------
+
             await client.query(
               `
-              INSERT INTO users (
-                id,
-                name,
-                email,
-                password_hash,
-                role,
-                source
-              )
-
-              VALUES (
-                $1,
-                $2,
-                $3,
-                $4,
-                $5,
-                $6
-              )
-
-              ON CONFLICT (id)
-
-              DO UPDATE SET
-                name=EXCLUDED.name,
-                email=EXCLUDED.email,
-                role=EXCLUDED.role,
-                source=EXCLUDED.source,
-                updated_at=NOW()
+              DELETE FROM user_roles
+              WHERE user_id=$1
               `,
               [
-                Number(user.id),
-                user.name,
-                user.email,
+                actualId
+              ]
+            )
 
+            for (
+              const role
+              of roles
+            ) {
+              await client.query(
+                `
+                INSERT INTO user_roles (
+                  user_id,
+                  role
+                )
+
+                VALUES (
+                  $1,
+                  $2
+                )
+
+                ON CONFLICT (
+                  user_id,
+                  role
+                )
+
+                DO NOTHING
+                `,
+                [
+                  actualId,
+                  role
+                ]
+              )
+            }
+
+            const updatedRow = {
+              id:
+                actualId,
+
+              email,
+
+              password_hash:
                 passwordById.get(
-                  Number(user.id)
+                  actualId
                 ) ||
                 defaultHash,
 
-                user.role,
+              source:
+                incomingUser.source ||
+                'classfocus',
 
-                user.source ||
-                'classfocus'
-              ]
+              role:
+                primaryRole
+            }
+
+            existingById.set(
+              actualId,
+              updatedRow
+            )
+
+            existingByEmail.set(
+              emailKey,
+              updatedRow
+            )
+
+            passwordById.set(
+              actualId,
+              updatedRow.password_hash
             )
           }
+
+          // =================================================
+          // AJUSTAR SECUENCIA
+          // =================================================
 
           await client.query(
             `
@@ -667,6 +1516,7 @@ export function createApp({
                       MAX(id),
                       1
                     )
+
                   FROM users
                 ),
 
@@ -677,6 +1527,10 @@ export function createApp({
             )
             `
           )
+
+          // =================================================
+          // MATERIAS
+          // =================================================
 
           const incomingSubjectIds =
             subjects
@@ -702,10 +1556,12 @@ export function createApp({
               DELETE FROM subjects
 
               WHERE
-                source <> 'google-classroom'
+                source <>
+                'google-classroom'
 
               AND NOT (
-                id = ANY($1::text[])
+                id =
+                ANY($1::text[])
               )
               `,
               [
@@ -716,13 +1572,17 @@ export function createApp({
             await client.query(
               `
               DELETE FROM subjects
-              WHERE source <> 'google-classroom'
+
+              WHERE
+                source <>
+                'google-classroom'
               `
             )
           }
 
           for (
-            const subject of subjects
+            const subject
+            of subjects
           ) {
             if (
               importedIds.has(
@@ -734,6 +1594,23 @@ export function createApp({
             ) {
               continue
             }
+
+            const incomingTeacherId =
+              Number(
+                subject.defaultTeacherId
+              )
+
+            const resolvedTeacherId =
+              resolvedUserIds.get(
+                incomingTeacherId
+              ) ||
+              (
+                Number.isInteger(
+                  incomingTeacherId
+                )
+                  ? incomingTeacherId
+                  : null
+              )
 
             await client.query(
               `
@@ -768,26 +1645,48 @@ export function createApp({
               ON CONFLICT (id)
 
               DO UPDATE SET
-                name=EXCLUDED.name,
-                code=EXCLUDED.code,
-                section=EXCLUDED.section,
-                schedule=EXCLUDED.schedule,
-                default_teacher_id=EXCLUDED.default_teacher_id,
-                source=EXCLUDED.source,
-                classroom_id=EXCLUDED.classroom_id,
-                classroom_url=EXCLUDED.classroom_url,
-                course_work=EXCLUDED.course_work,
-                updated_at=NOW()
+                name =
+                  EXCLUDED.name,
+
+                code =
+                  EXCLUDED.code,
+
+                section =
+                  EXCLUDED.section,
+
+                schedule =
+                  EXCLUDED.schedule,
+
+                default_teacher_id =
+                  EXCLUDED.default_teacher_id,
+
+                source =
+                  EXCLUDED.source,
+
+                classroom_id =
+                  EXCLUDED.classroom_id,
+
+                classroom_url =
+                  EXCLUDED.classroom_url,
+
+                course_work =
+                  EXCLUDED.course_work,
+
+                updated_at =
+                  NOW()
               `,
               [
                 subject.id,
                 subject.name,
                 subject.code,
-                subject.section || '',
-                subject.schedule || '',
 
-                subject.defaultTeacherId ||
-                null,
+                subject.section ||
+                '',
+
+                subject.schedule ||
+                '',
+
+                resolvedTeacherId,
 
                 subject.source ||
                 'classfocus',
@@ -806,6 +1705,10 @@ export function createApp({
             )
           }
 
+          // =================================================
+          // MATRÍCULAS
+          // =================================================
+
           await client.query(
             `
             DELETE FROM enrollments
@@ -813,17 +1716,42 @@ export function createApp({
             WHERE subject_id IN (
               SELECT id
               FROM subjects
-              WHERE source <> 'google-classroom'
+              WHERE source <>
+              'google-classroom'
             )
             `
           )
 
           for (
-            const assignment of assignments
+            const assignment
+            of assignments
           ) {
+            const incomingStudentId =
+              Number(
+                assignment.studentId
+              )
+
+            const incomingTeacherId =
+              Number(
+                assignment.teacherId
+              )
+
+            const studentId =
+              resolvedUserIds.get(
+                incomingStudentId
+              ) ||
+              incomingStudentId
+
+            const teacherId =
+              resolvedUserIds.get(
+                incomingTeacherId
+              ) ||
+              incomingTeacherId
+
             for (
               const subjectId
-              of assignment.subjectIds || []
+              of assignment.subjectIds ||
+              []
             ) {
               if (
                 importedIds.has(
@@ -857,14 +1785,8 @@ export function createApp({
                     EXCLUDED.teacher_id
                 `,
                 [
-                  Number(
-                    assignment.studentId
-                  ),
-
-                  Number(
-                    assignment.teacherId
-                  ),
-
+                  studentId,
+                  teacherId,
                   subjectId
                 ]
               )
@@ -905,14 +1827,17 @@ export function createApp({
         req.body.exams
 
       for (
-        const exam of exams
+        const exam
+        of exams
       ) {
         if (
           req.user.role !==
-          'admin' &&
+            'admin' &&
 
-          Number(exam.teacherId) !==
-          req.user.id
+          Number(
+            exam.teacherId
+          ) !==
+            req.user.id
         ) {
           throw new HttpError(
             403,
@@ -950,11 +1875,11 @@ export function createApp({
           existing.rows[0] &&
 
           req.user.role !==
-          'admin' &&
+            'admin' &&
 
           existing.rows[0]
             .teacher_id !==
-          req.user.id
+            req.user.id
         ) {
           throw new HttpError(
             403,
@@ -971,8 +1896,6 @@ export function createApp({
                 exam.id
             )
 
-          // El guardado de un maestro
-          // nunca elimina evaluaciones de otro.
           if (
             req.user.role ===
             'admin'
@@ -982,7 +1905,8 @@ export function createApp({
               DELETE FROM exams
 
               WHERE NOT (
-                id=ANY($1::text[])
+                id =
+                ANY($1::text[])
               )
               `,
               [
@@ -997,7 +1921,8 @@ export function createApp({
               WHERE teacher_id=$1
 
               AND NOT (
-                id=ANY($2::text[])
+                id =
+                ANY($2::text[])
               )
               `,
               [
@@ -1008,7 +1933,8 @@ export function createApp({
           }
 
           for (
-            const exam of exams
+            const exam
+            of exams
           ) {
             const saved =
               await client.query(
@@ -1079,7 +2005,6 @@ export function createApp({
                   ),
 
                   exam.subjectId,
-
                   exam.title,
 
                   exam.instructions ||
@@ -1095,10 +2020,12 @@ export function createApp({
                   exam.status,
 
                   exam.createdAt ||
-                  new Date().toISOString(),
+                  new Date()
+                    .toISOString(),
 
                   exam.updatedAt ||
-                  new Date().toISOString(),
+                  new Date()
+                    .toISOString(),
 
                   req.user.id,
 
@@ -1126,7 +2053,7 @@ export function createApp({
   )
 
   // =========================================================
-  // VALIDACIÓN DE EVENTOS
+  // VALIDACIÓN EVENTOS ALUMNO
   // =========================================================
 
   const validateStudentEvent =
@@ -1149,10 +2076,14 @@ export function createApp({
         await db.query(
           `
           SELECT 1
+
           FROM enrollments
 
-          WHERE student_id=$1
-          AND subject_id=$2
+          WHERE
+            student_id=$1
+
+          AND
+            subject_id=$2
           `,
           [
             user.id,
@@ -1176,11 +2107,17 @@ export function createApp({
           await db.query(
             `
             SELECT 1
+
             FROM exams
 
-            WHERE id=$1
-            AND subject_id=$2
-            AND status='published'
+            WHERE
+              id=$1
+
+            AND
+              subject_id=$2
+
+            AND
+              status='published'
             `,
             [
               event.examId,
@@ -1216,6 +2153,7 @@ export function createApp({
     ) =>
       Math.min(
         max,
+
         Math.max(
           min,
 
@@ -1233,7 +2171,8 @@ export function createApp({
       max
     ) =>
       String(
-        value ?? ''
+        value ??
+        ''
       ).slice(
         0,
         max
@@ -1245,12 +2184,15 @@ export function createApp({
 
   app.post(
     '/api/incidents',
-    requireRole('student'),
+    requireRole(
+      'student'
+    ),
     async (req, res) => {
       const {
         studentId,
         incident = {}
-      } = req.body || {}
+      } =
+        req.body || {}
 
       await validateStudentEvent(
         req.user,
@@ -1258,13 +2200,12 @@ export function createApp({
         incident
       )
 
-      // El tipo y severidad se limitan.
-      // La hora la fija el servidor.
-
       const type =
-        /^[a-z0-9-]{1,60}$/i.test(
-          incident.type || ''
-        )
+        /^[a-z0-9-]{1,60}$/i
+          .test(
+            incident.type ||
+            ''
+          )
           ? incident.type
           : 'unknown'
 
@@ -1301,7 +2242,9 @@ export function createApp({
           RETURNING id
           `,
           [
-            Number(studentId),
+            Number(
+              studentId
+            ),
 
             incident.subjectId ||
             null,
@@ -1324,9 +2267,11 @@ export function createApp({
         .status(201)
         .json({
           ok: true,
-          id: String(
-            result.rows[0].id
-          )
+
+          id:
+            String(
+              result.rows[0].id
+            )
         })
     }
   )
@@ -1337,12 +2282,15 @@ export function createApp({
 
   app.post(
     '/api/samples',
-    requireRole('student'),
+    requireRole(
+      'student'
+    ),
     async (req, res) => {
       const {
         studentId,
         sample = {}
-      } = req.body || {}
+      } =
+        req.body || {}
 
       await validateStudentEvent(
         req.user,
@@ -1376,7 +2324,9 @@ export function createApp({
           RETURNING id
           `,
           [
-            Number(studentId),
+            Number(
+              studentId
+            ),
 
             sample.subjectId ||
             null,
@@ -1410,9 +2360,10 @@ export function createApp({
         .json({
           ok: true,
 
-          id: String(
-            result.rows[0].id
-          )
+          id:
+            String(
+              result.rows[0].id
+            )
         })
     }
   )
@@ -1420,13 +2371,6 @@ export function createApp({
   // =========================================================
   // ALERTAS EN VIVO
   // =========================================================
-
-  // Alertas casi en vivo para el maestro.
-  // Sin afterId solo devuelve el último id
-  // y no vuelca el historial.
-  //
-  // El maestro ve únicamente sus materias.
-  // El admin ve todo.
 
   app.get(
     '/api/incidents/live',
@@ -1488,7 +2432,8 @@ export function createApp({
 
             FROM incidents i
 
-            WHERE ${scope}
+            WHERE
+              ${scope}
             `,
             scopeParams
           )
@@ -1513,17 +2458,24 @@ export function createApp({
             i.severity,
             i.occurred_at,
             i.student_id,
-            u.name AS student_name,
+
+            u.name
+              AS student_name,
+
             i.subject_id,
-            s.name AS subject_name
+
+            s.name
+              AS subject_name
 
           FROM incidents i
 
           JOIN users u
-            ON u.id=i.student_id
+            ON u.id =
+            i.student_id
 
           LEFT JOIN subjects s
-            ON s.id=i.subject_id
+            ON s.id =
+            i.subject_id
 
           WHERE
             ${scope}
@@ -1547,7 +2499,9 @@ export function createApp({
         result.rows.map(
           row => ({
             id:
-              String(row.id),
+              String(
+                row.id
+              ),
 
             type:
               row.type,
@@ -1590,7 +2544,7 @@ export function createApp({
   )
 
   // =========================================================
-  // MANEJO DE ERRORES
+  // ERRORES
   // =========================================================
 
   app.use(
@@ -1601,7 +2555,9 @@ export function createApp({
       _next
     ) => {
       const status =
-        error instanceof HttpError
+        error instanceof
+          HttpError
+
           ? error.status
           : 500
 
@@ -1620,7 +2576,9 @@ export function createApp({
         .json({
           message:
             status === 500
+
               ? 'Error interno de ClassFocus API.'
+
               : error.message
         })
     }
@@ -1652,18 +2610,8 @@ async function start() {
     attempt += 1
   ) {
     try {
-      // Crea tablas y datos iniciales
-      // si todavía no existen.
       await initializeDatabase()
 
-      // Render crea automáticamente
-      // la variable PORT.
-      //
-      // Si estamos trabajando localmente,
-      // usa API_PORT.
-      //
-      // Si tampoco existe,
-      // usa 8788.
       const port =
         Number(
           process.env.PORT ||
@@ -1671,10 +2619,6 @@ async function start() {
           8788
         )
 
-      // Render necesita escuchar
-      // en 0.0.0.0.
-      //
-      // También funciona localmente.
       const host =
         process.env.API_HOST ||
         '0.0.0.0'
@@ -1688,7 +2632,7 @@ async function start() {
           )
 
           console.log(
-            `Health check: /api/health`
+            'Health check: /api/health'
           )
         }
       )
@@ -1721,7 +2665,7 @@ async function start() {
 }
 
 // Permite importar la aplicación
-// en pruebas sin abrir el servidor.
+// en pruebas sin abrir servidor.
 if (
   process.argv[1] &&
   import.meta.url ===

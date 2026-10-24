@@ -2,8 +2,14 @@ import 'dotenv/config'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { WebSocketServer } from 'ws'
+
 import { pool } from './database.js'
 import { hashToken } from './auth.js'
+
+
+// =====================================================
+// SERVIDOR DE SEÑALIZACIÓN
+// =====================================================
 
 // Las salas viven durante la llamada.
 // Reiniciar este proceso finaliza todas las clases.
@@ -12,90 +18,170 @@ export function createSignalingServer({
   port = 8787,
   host = '127.0.0.1',
   maxStudents = 8,
-  origins = [process.env.FRONTEND_URL || 'http://localhost:5173'],
+  origins = [
+    process.env.FRONTEND_URL ||
+    'http://localhost:5173'
+  ],
   heartbeatMs = 30000
 } = {}) {
+
   const rooms = new Map()
 
-  const wss = new WebSocketServer({
-    port,
-    host,
-    maxPayload: 128 * 1024,
+  const wss =
+    new WebSocketServer({
+      port,
+      host,
 
-    verifyClient: ({ origin }) =>
-      !origin || origins.includes(origin)
-  })
+      maxPayload:
+        128 * 1024,
 
-  const send = (socket, data) => {
-    if (socket.readyState === 1) {
-      socket.send(JSON.stringify(data))
-    }
-  }
-
-  const person = socket => ({
-    peerId: socket.peerId,
-    id: socket.user.id,
-    name: socket.user.name,
-    hand: !!socket.hand
-  })
-
-  const snapshot = room => ({
-    type: 'room',
-    subjectId: room.subjectId,
-
-    teacher:
-      person(room.teacher),
-
-    students:
-      [...room.students.values()]
-        .map(person),
-
-    floorId:
-      room.floorId,
-
-    teacherVideo:
-      room.teacherVideo
-  })
-
-  const broadcast = room => {
-    [
-      room.teacher,
-      ...room.students.values()
-    ].forEach(socket => {
-      send(
-        socket,
-        snapshot(room)
-      )
+      verifyClient: ({
+        origin
+      }) =>
+        !origin ||
+        origins.includes(origin)
     })
-  }
 
-  // =====================================================
-  // IDENTIDAD
-  // =====================================================
 
-  async function identity(socket) {
-    const result = await db.query(
-      `
-      SELECT
-        u.id,
-        u.name,
-        u.role
+  // ===================================================
+  // ENVIAR MENSAJE
+  // ===================================================
 
-      FROM app_sessions s
+  const send =
+    (
+      socket,
+      data
+    ) => {
+      if (
+        socket.readyState === 1
+      ) {
+        socket.send(
+          JSON.stringify(data)
+        )
+      }
+    }
 
-      JOIN users u
-        ON u.id = s.user_id
 
-      WHERE
-        s.token_hash = $1
+  // ===================================================
+  // INFORMACIÓN PÚBLICA DE PARTICIPANTE
+  // ===================================================
 
-      AND
-        s.expires_at > NOW()
-      `,
+  const person =
+    socket => ({
+      peerId:
+        socket.peerId,
+
+      id:
+        socket.user.id,
+
+      name:
+        socket.user.name,
+
+      hand:
+        !!socket.hand
+    })
+
+
+  // ===================================================
+  // ESTADO DE SALA
+  // ===================================================
+
+  const snapshot =
+    room => ({
+      type:
+        'room',
+
+      subjectId:
+        room.subjectId,
+
+      teacher:
+        person(
+          room.teacher
+        ),
+
+      students:
+        [
+          ...room.students.values()
+        ].map(person),
+
+      floorId:
+        room.floorId,
+
+      teacherVideo:
+        room.teacherVideo
+    })
+
+
+  const broadcast =
+    room => {
       [
-        socket.tokenHash
-      ]
-    )
+        room.teacher,
+        ...room.students.values()
+      ].forEach(
+        socket => {
+          send(
+            socket,
+            snapshot(room)
+          )
+        }
+      )
+    }
+
+
+  // =====================================================
+  // IDENTIDAD + ROL ACTIVO
+  // =====================================================
+
+  async function identity(
+    socket
+  ) {
+
+    const result =
+      await db.query(
+        `
+        SELECT
+          u.id,
+          u.name,
+          u.email,
+
+          COALESCE(
+            s.active_role,
+            u.role
+          ) AS role,
+
+          COALESCE(
+            (
+              SELECT ARRAY_AGG(
+                ur.role
+                ORDER BY ur.role
+              )
+
+              FROM user_roles ur
+
+              WHERE
+                ur.user_id = u.id
+            ),
+
+            ARRAY[u.role]::varchar[]
+          ) AS roles
+
+        FROM app_sessions s
+
+        JOIN users u
+          ON u.id = s.user_id
+
+        WHERE
+          s.token_hash = $1
+
+        AND
+          s.expires_at > NOW()
+
+        LIMIT 1
+        `,
+        [
+          socket.tokenHash
+        ]
+      )
 
     if (
       socket.readyState !== 1
@@ -105,26 +191,49 @@ export function createSignalingServer({
       )
     }
 
-    if (
-      !result.rows[0]
-    ) {
+
+    const user =
+      result.rows[0]
+
+
+    if (!user) {
       throw new Error(
         'La sesión venció. Inicia sesión nuevamente.'
       )
     }
 
+
+    // El rol activo todavía debe
+    // pertenecer al usuario.
     if (
-      socket.user &&
-      socket.user.role !==
-        result.rows[0].role
+      !user.roles.includes(
+        user.role
+      )
     ) {
       throw new Error(
-        'Tu perfil cambió. Inicia sesión nuevamente.'
+        'Tu perfil ya no está asignado. Inicia sesión nuevamente.'
       )
     }
 
-    return result.rows[0]
+
+    // Si cambió de alumno a maestro
+    // o viceversa mientras tenía abierta
+    // una conexión WebSocket, obligamos
+    // a crear una conexión nueva.
+    if (
+      socket.user &&
+      socket.user.role !==
+        user.role
+    ) {
+      throw new Error(
+        'Tu perfil cambió. Vuelve a conectar la clase.'
+      )
+    }
+
+
+    return user
   }
+
 
   // =====================================================
   // AUTORIZACIÓN PARA MATERIA
@@ -134,8 +243,10 @@ export function createSignalingServer({
     socket,
     subjectId
   ) {
+
     const user =
       await identity(socket)
+
 
     const result =
       await db.query(
@@ -147,12 +258,10 @@ export function createSignalingServer({
         WHERE id = $1
 
         AND (
-
           (
             $3 = 'teacher'
 
             AND (
-
               default_teacher_id = $2
 
               OR EXISTS (
@@ -186,7 +295,6 @@ export function createSignalingServer({
                 student_id = $2
             )
           )
-
         )
         `,
         [
@@ -196,6 +304,7 @@ export function createSignalingServer({
         ]
       )
 
+
     if (
       socket.readyState !== 1
     ) {
@@ -204,32 +313,41 @@ export function createSignalingServer({
       )
     }
 
+
     if (
       !result.rows.length
     ) {
       throw new Error(
-        'No tienes acceso a esta materia.'
+        'No tienes acceso a esta materia con el perfil seleccionado.'
       )
     }
 
+
     return user
   }
+
 
   // =====================================================
   // CLASES ACTIVAS PARA ALUMNOS
   // =====================================================
 
-  async function sendClasses(socket) {
-    await identity(socket)
+  async function sendClasses(
+    socket
+  ) {
+
+    socket.user =
+      await identity(socket)
+
 
     if (
       socket.user.role !==
       'student'
     ) {
       throw new Error(
-        'Los avisos de clase son para alumnos.'
+        'Los avisos de clase son para el perfil de alumno.'
       )
     }
+
 
     const result =
       await db.query(
@@ -245,11 +363,13 @@ export function createSignalingServer({
         ]
       )
 
+
     if (
       socket.readyState !== 1
     ) {
       return
     }
+
 
     const allowed =
       new Set(
@@ -259,10 +379,11 @@ export function createSignalingServer({
         )
       )
 
-    // Nunca se publica la lista global
-    // ni cámaras o nombres de otros alumnos.
+
     const classes =
-      [...rooms.values()]
+      [
+        ...rooms.values()
+      ]
         .filter(
           room =>
             allowed.has(
@@ -278,15 +399,21 @@ export function createSignalingServer({
               room.instanceId,
 
             teacherName:
-              room.teacher.user.name
+              room.teacher
+                .user
+                .name
           })
         )
 
+
     const payload =
       JSON.stringify({
-        type: 'classes',
+        type:
+          'classes',
+
         classes
       })
+
 
     if (
       payload !==
@@ -295,9 +422,12 @@ export function createSignalingServer({
       socket.lastClasses =
         payload
 
-      socket.send(payload)
+      socket.send(
+        payload
+      )
     }
   }
+
 
   // =====================================================
   // RECHAZAR CONEXIÓN
@@ -307,10 +437,13 @@ export function createSignalingServer({
     socket,
     error
   ) {
+
     send(
       socket,
       {
-        type: 'error',
+        type:
+          'error',
+
         message:
           error.message
       }
@@ -324,24 +457,30 @@ export function createSignalingServer({
     )
   }
 
+
   // =====================================================
-  // NOTIFICAR ALUMNOS
+  // AVISAR CAMBIOS A LOS ALUMNOS
   // =====================================================
 
   function notifyWatchers() {
+
     for (
       const socket
       of wss.clients
     ) {
+
       if (
         socket.watching &&
         socket.readyState === 1
       ) {
+
         socket.queue =
           socket.queue
             .then(
               () =>
-                sendClasses(socket)
+                sendClasses(
+                  socket
+                )
             )
             .catch(
               error =>
@@ -354,11 +493,15 @@ export function createSignalingServer({
     }
   }
 
+
   // =====================================================
   // SALIR DE SALA
   // =====================================================
 
-  function leave(socket) {
+  function leave(
+    socket
+  ) {
+
     const room =
       rooms.get(
         socket.subjectId
@@ -367,57 +510,68 @@ export function createSignalingServer({
     socket.subjectId =
       null
 
-    if (
-      !room
-    ) {
+
+    if (!room) {
       return
     }
 
-    // Si se va el maestro,
-    // termina toda la clase.
+
+    // Si se desconecta el maestro,
+    // termina la clase completa.
     if (
-      room.teacher === socket
+      room.teacher ===
+      socket
     ) {
+
       rooms.delete(
         room.subjectId
       )
 
       notifyWatchers()
 
+
       for (
         const student
         of room.students.values()
       ) {
+
         student.subjectId =
           null
 
         send(
           student,
           {
-            type: 'ended',
+            type:
+              'ended',
 
             message:
               'El maestro finalizó la clase o perdió la conexión.'
           }
         )
       }
-    } else {
-      // Si se va un alumno.
-      room.students.delete(
-        socket.peerId
-      )
 
-      if (
-        room.floorId ===
-        socket.peerId
-      ) {
-        room.floorId =
-          null
-      }
-
-      broadcast(room)
+      return
     }
+
+
+    // Alumno sale.
+    room.students.delete(
+      socket.peerId
+    )
+
+
+    if (
+      room.floorId ===
+      socket.peerId
+    ) {
+      room.floorId =
+        null
+    }
+
+
+    broadcast(room)
   }
+
 
   // =====================================================
   // RECIBIR MENSAJES
@@ -427,42 +581,54 @@ export function createSignalingServer({
     socket,
     message
   ) {
+
     if (
       socket.readyState !== 1
     ) {
       return
     }
 
-    // ---------------------------------------------------
+
+    // ===================================================
     // AUTENTICACIÓN
-    // ---------------------------------------------------
+    // ===================================================
 
     if (
       message.type ===
       'authenticate'
     ) {
+
       if (
         socket.user ||
-        !/^[A-Za-z0-9_-]{43}$/.test(
-          message.token || ''
-        )
+
+        !/^[A-Za-z0-9_-]{43}$/
+          .test(
+            message.token ||
+            ''
+          )
       ) {
         throw new Error(
           'Sesión inválida.'
         )
       }
 
+
       socket.tokenHash =
         hashToken(
           message.token
         )
 
+
       socket.user =
-        await identity(socket)
+        await identity(
+          socket
+        )
+
 
       clearTimeout(
         socket.authTimer
       )
+
 
       send(
         socket,
@@ -481,6 +647,7 @@ export function createSignalingServer({
       return
     }
 
+
     if (
       !socket.user
     ) {
@@ -489,14 +656,16 @@ export function createSignalingServer({
       )
     }
 
-    // ---------------------------------------------------
-    // ALUMNO ESCUCHANDO AVISOS
-    // ---------------------------------------------------
+
+    // ===================================================
+    // ESCUCHAR AVISOS
+    // ===================================================
 
     if (
       message.type ===
       'watch'
     ) {
+
       if (
         socket.subjectId
       ) {
@@ -504,6 +673,23 @@ export function createSignalingServer({
           'Sal de la clase antes de consultar avisos.'
         )
       }
+
+
+      // Solo el perfil alumno
+      // puede escuchar avisos.
+      socket.user =
+        await identity(socket)
+
+
+      if (
+        socket.user.role !==
+        'student'
+      ) {
+        throw new Error(
+          'Debes usar tu perfil de alumno para recibir avisos de clase.'
+        )
+      }
+
 
       socket.watching =
         true
@@ -515,14 +701,16 @@ export function createSignalingServer({
       return
     }
 
-    // ---------------------------------------------------
-    // ENTRAR A CLASE
-    // ---------------------------------------------------
+
+    // ===================================================
+    // ENTRAR / CREAR CLASE
+    // ===================================================
 
     if (
       message.type ===
       'join'
     ) {
+
       if (
         socket.watching
       ) {
@@ -530,6 +718,7 @@ export function createSignalingServer({
           'Los avisos no participan en la llamada.'
         )
       }
+
 
       if (
         socket.subjectId
@@ -539,11 +728,13 @@ export function createSignalingServer({
         )
       }
 
+
       const subjectId =
         String(
           message.subjectId ||
           ''
         )
+
 
       socket.user =
         await authorized(
@@ -551,26 +742,28 @@ export function createSignalingServer({
           subjectId
         )
 
+
       let room =
         rooms.get(
           subjectId
         )
 
-      // -------------------------------------------------
-      // MAESTRO CREA LA SALA
-      // -------------------------------------------------
+
+      // =================================================
+      // MAESTRO CREA SALA
+      // =================================================
 
       if (
         socket.user.role ===
         'teacher'
       ) {
-        if (
-          room
-        ) {
+
+        if (room) {
           throw new Error(
             'Ya hay un maestro impartiendo esta clase.'
           )
         }
+
 
         room = {
           subjectId,
@@ -588,27 +781,36 @@ export function createSignalingServer({
             null,
 
           teacherVideo: {
-            source: 'off',
-            revision: 0
+            source:
+              'off',
+
+            revision:
+              0
           }
         }
+
 
         rooms.set(
           subjectId,
           room
         )
-      } else {
-        // -----------------------------------------------
-        // ALUMNO ENTRA A SALA EXISTENTE
-        // -----------------------------------------------
+      }
 
-        if (
-          !room
-        ) {
+      // =================================================
+      // ALUMNO ENTRA
+      // =================================================
+
+      else if (
+        socket.user.role ===
+        'student'
+      ) {
+
+        if (!room) {
           throw new Error(
             'El maestro todavía no ha iniciado la clase. Intenta de nuevo cuando esté listo.'
           )
         }
+
 
         if (
           room.students.size >=
@@ -619,18 +821,21 @@ export function createSignalingServer({
           )
         }
 
+
         if (
-          [...room.students.values()]
-            .some(
-              student =>
-                student.user.id ===
-                socket.user.id
-            )
+          [
+            ...room.students.values()
+          ].some(
+            student =>
+              student.user.id ===
+              socket.user.id
+          )
         ) {
           throw new Error(
             'Ya entraste a esta clase en otra pestaña.'
           )
         }
+
 
         room.students.set(
           socket.peerId,
@@ -638,19 +843,35 @@ export function createSignalingServer({
         )
       }
 
+      // =================================================
+      // OTROS ROLES
+      // =================================================
+
+      else {
+        throw new Error(
+          'Debes utilizar el perfil de alumno o maestro para entrar a una clase.'
+        )
+      }
+
+
       socket.subjectId =
         subjectId
+
 
       send(
         socket,
         {
-          type: 'joined',
+          type:
+            'joined',
+
           peerId:
             socket.peerId
         }
       )
 
+
       broadcast(room)
+
 
       if (
         socket.user.role ===
@@ -659,53 +880,64 @@ export function createSignalingServer({
         notifyWatchers()
       }
 
+
       return
     }
 
-    // ---------------------------------------------------
+
+    // ===================================================
     // SALIR
-    // ---------------------------------------------------
+    // ===================================================
 
     if (
       message.type ===
       'leave'
     ) {
+
       leave(socket)
+
       return
     }
+
 
     const room =
       rooms.get(
         socket.subjectId
       )
 
-    if (
-      !room
-    ) {
+
+    if (!room) {
       throw new Error(
         'Entra primero a una clase.'
       )
     }
 
-    // También se revisan matrículas
-    // y sesiones al usar la sala.
-    await authorized(
-      socket,
-      room.subjectId
-    )
+
+    // Revisar nuevamente sesión,
+    // perfil y matrícula.
+    socket.user =
+      await authorized(
+        socket,
+        room.subjectId
+      )
+
 
     const teacher =
-      room.teacher === socket
+      room.teacher ===
+      socket
 
-    // ---------------------------------------------------
+
+    // ===================================================
     // VIDEO DEL MAESTRO
-    // ---------------------------------------------------
+    // ===================================================
 
     if (
       message.type ===
         'media' &&
+
       teacher
     ) {
+
       if (
         ![
           'off',
@@ -720,6 +952,7 @@ export function createSignalingServer({
         )
       }
 
+
       room.teacherVideo = {
         source:
           message.source,
@@ -729,24 +962,30 @@ export function createSignalingServer({
             .revision + 1
       }
 
+
       broadcast(room)
     }
 
-    // ---------------------------------------------------
+
+    // ===================================================
     // LEVANTAR MANO
-    // ---------------------------------------------------
+    // ===================================================
 
     else if (
       message.type ===
         'hand' &&
+
       !teacher
     ) {
+
       socket.hand =
         message.raised ===
         true
 
+
       if (
         !socket.hand &&
+
         room.floorId ===
           socket.peerId
       ) {
@@ -754,21 +993,26 @@ export function createSignalingServer({
           null
       }
 
+
       broadcast(room)
     }
 
-    // ---------------------------------------------------
-    // MAESTRO DA LA PALABRA
-    // ---------------------------------------------------
+
+    // ===================================================
+    // DAR LA PALABRA
+    // ===================================================
 
     else if (
       message.type ===
         'floor' &&
+
       teacher
     ) {
+
       if (
         message.peerId !==
           null &&
+
         !room.students.has(
           message.peerId
         )
@@ -778,8 +1022,10 @@ export function createSignalingServer({
         )
       }
 
+
       room.floorId =
         message.peerId
+
 
       if (
         message.peerId
@@ -788,20 +1034,24 @@ export function createSignalingServer({
           .get(
             message.peerId
           )
-          .hand = false
+          .hand =
+            false
       }
+
 
       broadcast(room)
     }
 
-    // ---------------------------------------------------
+
+    // ===================================================
     // SEÑALIZACIÓN WEBRTC
-    // ---------------------------------------------------
+    // ===================================================
 
     else if (
       message.type ===
       'signal'
     ) {
+
       const target =
         teacher
           ? room.students.get(
@@ -809,10 +1059,13 @@ export function createSignalingServer({
             )
           : room.teacher
 
+
       if (
         !target ||
+
         (
           !teacher &&
+
           message.to !==
             target.peerId
         )
@@ -822,11 +1075,14 @@ export function createSignalingServer({
         )
       }
 
+
       const data =
         message.data
 
+
       if (
         !data ||
+
         ![
           'offer',
           'answer',
@@ -840,16 +1096,19 @@ export function createSignalingServer({
         )
       }
 
+
       if (
         (
           data.kind ===
             'offer' &&
+
           !teacher
         ) ||
 
         (
           data.kind ===
             'answer' &&
+
           teacher
         )
       ) {
@@ -858,10 +1117,12 @@ export function createSignalingServer({
         )
       }
 
+
       if (
         data.kind ===
         'ice'
       ) {
+
         if (
           typeof data
             .candidate
@@ -872,6 +1133,7 @@ export function createSignalingServer({
             'Candidato inválido.'
           )
         }
+
       } else if (
         typeof data.sdp !==
           'string' ||
@@ -883,6 +1145,7 @@ export function createSignalingServer({
           'Descripción inválida.'
         )
       }
+
 
       send(
         target,
@@ -896,12 +1159,20 @@ export function createSignalingServer({
           data
         }
       )
-    } else {
+    }
+
+
+    // ===================================================
+    // ACCIÓN NO VÁLIDA
+    // ===================================================
+
+    else {
       throw new Error(
         'Acción no permitida.'
       )
     }
   }
+
 
   // =====================================================
   // CONEXIONES WEBSOCKET
@@ -910,6 +1181,7 @@ export function createSignalingServer({
   wss.on(
     'connection',
     socket => {
+
       socket.peerId =
         randomUUID()
 
@@ -919,6 +1191,7 @@ export function createSignalingServer({
       socket.queue =
         Promise.resolve()
 
+
       socket.authTimer =
         setTimeout(
           () =>
@@ -926,8 +1199,14 @@ export function createSignalingServer({
               4001,
               'Autenticación requerida'
             ),
+
           8000
         )
+
+
+      // =================================================
+      // PONG
+      // =================================================
 
       socket.on(
         'pong',
@@ -937,18 +1216,22 @@ export function createSignalingServer({
         }
       )
 
+
+      // =================================================
+      // MENSAJES
+      // =================================================
+
       socket.on(
         'message',
         raw => {
-          // Serializar evita que una oferta
-          // adelante a la autenticación
-          // o a la entrada.
 
           const now =
             Date.now()
 
+
           if (
             !socket.windowStart ||
+
             now -
               socket.windowStart >
               10000
@@ -960,7 +1243,9 @@ export function createSignalingServer({
               0
           }
 
+
           socket.messages++
+
 
           if (
             socket.messages >
@@ -974,29 +1259,41 @@ export function createSignalingServer({
             return
           }
 
+
+          // Serializar mensajes evita
+          // carreras entre autenticación,
+          // entrada y WebRTC.
           socket.queue =
             socket.queue.then(
               async () => {
+
                 try {
+
                   await receive(
                     socket,
+
                     JSON.parse(
                       raw.toString()
                     )
                   )
+
                 } catch (error) {
-                  // Un error no deja
-                  // medios ni participantes
-                  // huérfanos en la sala.
+
                   reject(
                     socket,
                     error
                   )
+
                 }
               }
             )
         }
       )
+
+
+      // =================================================
+      // ERROR
+      // =================================================
 
       socket.on(
         'error',
@@ -1005,9 +1302,15 @@ export function createSignalingServer({
         }
       )
 
+
+      // =================================================
+      // CERRAR
+      // =================================================
+
       socket.on(
         'close',
         () => {
+
           clearTimeout(
             socket.authTimer
           )
@@ -1018,6 +1321,7 @@ export function createSignalingServer({
     }
   )
 
+
   // =====================================================
   // HEARTBEAT
   // =====================================================
@@ -1025,13 +1329,16 @@ export function createSignalingServer({
   const timer =
     setInterval(
       () => {
+
         for (
           const socket
           of wss.clients
         ) {
+
           if (
             !socket.alive
           ) {
+
             leave(socket)
 
             socket.terminate()
@@ -1039,40 +1346,55 @@ export function createSignalingServer({
             continue
           }
 
+
           socket.alive =
             false
 
           socket.ping()
 
+
           socket.queue =
             socket.queue.then(
               async () => {
+
                 if (
                   !socket.user
                 ) {
                   return
                 }
 
+
                 try {
+
                   if (
                     socket.watching
                   ) {
+
                     await sendClasses(
                       socket
                     )
+
                   } else if (
                     socket.subjectId
                   ) {
-                    await authorized(
-                      socket,
-                      socket.subjectId
-                    )
+
+                    socket.user =
+                      await authorized(
+                        socket,
+                        socket.subjectId
+                      )
+
                   } else {
-                    await identity(
-                      socket
-                    )
+
+                    socket.user =
+                      await identity(
+                        socket
+                      )
+
                   }
+
                 } catch {
+
                   send(
                     socket,
                     {
@@ -1080,22 +1402,27 @@ export function createSignalingServer({
                         'ended',
 
                       message:
-                        'Tu sesión o matrícula dejó de estar vigente.'
+                        'Tu sesión, perfil o matrícula dejó de estar vigente.'
                     }
                   )
 
+
                   leave(socket)
+
 
                   socket.close(
                     4001
                   )
+
                 }
               }
             )
         }
       },
+
       heartbeatMs
     )
+
 
   wss.on(
     'close',
@@ -1106,25 +1433,34 @@ export function createSignalingServer({
     }
   )
 
+
+  // =====================================================
+  // CERRAR SERVIDOR
+  // =====================================================
+
   return {
     wss,
     rooms,
 
     async close() {
+
       clearInterval(
         timer
       )
+
 
       for (
         const socket
         of wss.clients
       ) {
+
         clearTimeout(
           socket.authTimer
         )
 
         socket.terminate()
       }
+
 
       await new Promise(
         resolve =>
@@ -1136,19 +1472,22 @@ export function createSignalingServer({
   }
 }
 
+
 // =======================================================
 // INICIAR SERVIDOR
 // =======================================================
 
 if (
   process.argv[1] &&
+
   import.meta.url ===
     pathToFileURL(
       process.argv[1]
     ).href
 ) {
+
   // Render proporciona PORT automáticamente.
-  // En local se seguirá usando SIGNALING_PORT o 8787.
+  // En local se usa SIGNALING_PORT o 8787.
   const port =
     Number(
       process.env.PORT ||
@@ -1156,11 +1495,12 @@ if (
       8787
     )
 
-  // Render necesita que el servicio escuche
-  // en todas las interfaces.
+
+  // Render necesita 0.0.0.0.
   const host =
     process.env.SIGNALING_HOST ||
     '0.0.0.0'
+
 
   const { wss } =
     createSignalingServer({
@@ -1168,22 +1508,26 @@ if (
       host
     })
 
+
   wss.on(
     'listening',
     () => {
+
       console.log(
         `✅ ClassFocus Signaling activo en puerto ${port}`
       )
 
       console.log(
-        `✅ WebSocket listo para clases en vivo`
+        '✅ WebSocket listo para clases en vivo'
       )
     }
   )
 
+
   wss.on(
     'error',
     error => {
+
       console.error(
         '❌ No se pudo iniciar la señalización:',
         error.message
