@@ -219,6 +219,26 @@ test('clases: salas autenticadas, aislamiento, turnos, bajas y cierre', async t 
     assert.match((await expiring.box.next('ended')).message, /sesión/)
     assert.equal(server.rooms.size, 0)
   })
+  await t.test('multirrol: usa el perfil de la sesión y expulsa al cambiarlo durante la llamada', async () => {
+    await db.query("INSERT INTO user_roles(user_id,role) VALUES(2,'student')")
+    await db.query("INSERT INTO enrollments(student_id,teacher_id,subject_id) VALUES(2,4,'b')")
+    tokens.set(2, await auth.issue(2, 'student'))
+    const host = await client(4, 'b')
+    await host.box.next('joined'); await host.box.next('room')
+    // users.role sigue siendo teacher, pero esta sesión entra como alumno.
+    const pupil = await client(2, 'b')
+    await pupil.box.next('joined'); await pupil.box.next('room'); await host.box.next('room')
+    host.box.send({ type: 'floor', peerId: pupil.id })
+    await host.box.next('room'); await pupil.box.next('room')
+    pupil.box.send({ type: 'media', source: 'screen' })
+    assert.equal((await host.box.next('room')).presentation.peerId, pupil.id)
+    await pupil.box.next('room')
+    await db.query("UPDATE app_sessions SET active_role='teacher' WHERE user_id=2")
+    pupil.box.send({ type: 'hand', raised: true })
+    assert.match((await pupil.box.next('error')).message, /perfil cambió/)
+    assert.equal((await host.box.next('room')).students.length, 0)
+    host.box.send({ type: 'leave' })
+  })
 })
 
 test('avisos: estado inicial, inicio, fin y matrículas se actualizan sin entrar a la llamada', async t => {
@@ -280,7 +300,7 @@ test('avisos: estado inicial, inicio, fin y matrículas se actualizan sin entrar
     assert.deepEqual((await noSubjects.box.next('classes')).classes, [])
     noSubjects.socket.close()
     const forbidden = await watch(2)
-    assert.match((await forbidden.box.next('error')).message, /alumnos/)
+    assert.match((await forbidden.box.next('error')).message, /perfil de alumno/)
     assert.equal(server.rooms.has('a'), true, 'Rechazar un observador no afecta la llamada del maestro.')
   })
   await t.test('finalizar y reiniciar produce un estado nuevo para el mismo curso', async () => {
@@ -305,4 +325,20 @@ test('avisos: estado inicial, inicio, fin y matrículas se actualizan sin entrar
     await db.query('DELETE FROM app_sessions WHERE user_id=3')
     assert.match((await otherWatcher.box.next('ended')).message, /sesión/)
   })
+})
+
+
+test('migración: conserva cuentas y permite varias por usuario después de retirar el índice único', async () => {
+  const db = new PGlite()
+  try {
+    await db.exec(schema)
+    await db.query("INSERT INTO users(id,name,email,password_hash,role) VALUES(1,'Alumno','student@test.local','unused','student')")
+    await db.query("INSERT INTO classroom_connections(user_id,google_sub,email,display_name,encrypted_tokens) VALUES(1,'google-a','a@test.local','A','encrypted')")
+    await db.exec('DROP INDEX idx_classroom_connections_user; CREATE UNIQUE INDEX idx_classroom_connections_user ON classroom_connections(user_id)')
+    await db.exec(schema)
+    await db.exec(schema)
+    await db.query("INSERT INTO classroom_connections(user_id,google_sub,email,display_name,encrypted_tokens) VALUES(1,'google-b','b@test.local','B','encrypted')")
+    assert.equal((await db.query('SELECT id FROM classroom_connections WHERE user_id=1')).rows.length, 2)
+    assert.equal((await db.query("SELECT indisunique FROM pg_index WHERE indexrelid=to_regclass('idx_classroom_connections_user')")).rows[0].indisunique, false)
+  } finally { await db.close() }
 })
